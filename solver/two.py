@@ -1,139 +1,112 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable, Tuple, Any, Set, Union
-from .common import expr, scalar, variable, constraint, zero, one
+from .expressions import *
+#from .common import expr, scalar, variable, constraint, zero, one, abs, acos, prev, sqr, sqrt
 import numpy as np
 import math
 
 @dataclass(eq=False)
-class point(expr):
-    x : scalar = zero
-    y : scalar = zero
+class Vector(Compound):
+    x : Scalar
+    y : Scalar
 
-    def evaluate(self, x):
-        return np.array([x[self.x], x[self.y]])
+    def compound(self, other, operand):
+        assert isinstance(other, Vector)
+        return Vector(
+            operand(self.x, other.x),
+            operand(self.y, other.y))
 
-@dataclass(eq=False)
-class normal(expr):
-    pass
+    def distribute(self, operand):
+        return Vector(
+            operand(self.x),
+            operand(self.y))
 
-@dataclass(eq=False)
-class free_normal(normal):
-    x : variable
-    y : variable
+    def stringify(self, s):
+        return f"two.Vector({s(self.x)}, {s(self.y)})"
 
-    def evaluate(self, x):
-        return np.array([x[self.x], x[self.y]])
+    def __matmul__(self, other):
+        assert isinstance(other, Vector)
+        return dot(self, other)
+        
+    def __rmatmul__(self, other):
+        assert isinstance(other, Vector)
+        return dot(other, self)
 
-    def hard(self, x, _):
-        n = x[self]
-        yield n @ n - 1
+def dot(a, b):
+    return a.x*b.x + a.y*b.y
 
-@dataclass(eq=False)
-class transformed_normal(normal):
-    source : normal
-    matrix : np.array
-
-    def evaluate(self, x):
-        return self.matrix @ x[self.source]
-
-@dataclass(eq=False)
-class normal_between(normal):
-    source : point
-    target : point
-
-    def evaluate(self, x):
-        source = x[self.source]
-        target = x[self.target]
-        return target - source
+def mag(v):
+    return Sqrt(Sqr(v.x) + Sqr(v.y))
 
 @dataclass(eq=False)
-class line(expr):
-    orient   : normal
-    distance : scalar
+class Point(Vector):
+    def stringify(self, s):
+        return f"two.Point({s(self.x)}, {s(self.y)})"
 
-    def evaluate(self, x):
-        return x[self.orient], x[self.distance]
+@dataclass(eq=False)
+class Normal(Vector):
+    def constraints(self):
+        yield Eq(self @ self, one)
 
-def point_line_distance(point, orient, distance):
-    mag = np.linalg.norm(orient)
+    def stringify(self, s):
+        return f"two.Normal({s(self.x)}, {s(self.y)})"
+
+@dataclass(eq=False)
+class Line(Entity):
+    vector : Vector
+    scalar : Scalar
+
+    def stringify(self, s):
+        return f"two.Line({s(self.normal)}, {s(self.distance)})"
+
+def point_line_distance(point, vector, scalar):
+    mag = np.linalg.norm(vector)
     if mag >= 1e-12:
-        return abs(point @ orient + distance) / mag
+        return abs(point @ vector + scalar) / mag
     return 0.0
 
 @dataclass(eq=False)
-class drag(constraint):
-    a : point
-    b : point
+class Drag(Entity):
+    a : Point
+    b : Point
 
-    soft_weights = (100,)
-    def soft(self, x, _):
-        a = x[self.a]
-        b = x[self.b]
-        d = a - b
-        yield np.sqrt(d @ d)
+    def constraints(self):
+        yield Eq(mag(self.a - self.b), zero).soft(100)
 
 @dataclass(eq=False)
-class coincident(constraint):
-    a : point
-    t : line
+class Coincident(Entity):
+    a : Point
+    t : Line
 
-    def hard(self, x, _):
-        a = x[self.a]
-        orient, distance = x[self.t]
-        n2 = orient @ orient
-        if n2 >= 1e-12:
-            yield - distance - a @ orient
-        else:
-            yield 1
+    def constraints(self):
+        vector = self.t.vector
+        scalar = self.t.scalar
+        yield NonZero(vector @ vector)
+        yield Eq(self.a @ vector, -scalar)
 
 @dataclass(eq=False)
-class distance(constraint):
-    d : scalar
-    a : point
-    b : point
-    along : normal
-    mode : Callable[float, float] = abs
+class Distance(Entity):
+    d : Scalar
+    a : Point
+    b : Point
+    along : Vector
 
-    def hard(self, x, _):
-        d = x[self.d]
-        a = x[self.a]
-        b = x[self.b]
-        n = x[self.along]
-        mag = np.linalg.norm(n)
-        if mag >= 1e-12:
-            n = n / mag
-            yield self.mode(n @ b - n @ a) - d
-        else:
-            yield 1
+    def constraints(self):
+        n = self.along / mag(self.along)
+        yield Eq(Abs(n @ self.a - n @ self.b), self.d)
 
 @dataclass(eq=False)
-class phi(constraint):
-    a : scalar
-    n : normal
-    m : normal
-    #_a : variable = field(default_factory=lambda: variable(10))
-    #_b : variable = field(default_factory=lambda: variable(10))
+class Phi(Entity):
+    a : Scalar
+    n : Vector
+    m : Vector
 
-    def hard(self, x, _):
-        a = x[self.a]
-        n = x[self.n]
-        m = x[self.m]
-        magn = np.linalg.norm(n)
-        magm = np.linalg.norm(m)
-        if magn + magm >= 1e-12:
-            d = np.clip((n / magn) @ (m / magm), -1, +1)
-            yield np.acos(d) - a
-        else:
-            yield 1
-
-    soft_weights = (0.1, 0.1)
-    def soft(self, x, x0):
-        n0 = x0[self.n]
-        m0 = x0[self.m]
-        n = x[self.n]
-        m = x[self.m]
-        yield (np.linalg.norm(n0) - np.linalg.norm(n))
-        yield (np.linalg.norm(m0) - np.linalg.norm(m))
+    def constraints(self):
+        mag_n = mag(self.n)
+        mag_m = mag(self.m)
+        yield Eq(Acos(dot(self.n / mag_n, self.m / mag_m)), self.a)
+        yield Eq(mag_n, Previous(mag_n)).soft(0.1)
+        yield Eq(mag_m, Previous(mag_m)).soft(0.1)
 
 def angle_of(n, m):
     magn = np.linalg.norm(n)

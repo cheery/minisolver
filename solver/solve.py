@@ -1,6 +1,41 @@
+from .expressions import NonZero, Eq, SoftEq, print_system, all_variables, VectoredContext
 import numpy as np
 import random
 import math
+
+def setup(entities, context):
+    hard = []
+    soft = []
+    for entity in entities:
+        for obj in entity.equations:
+            if isinstance(obj, (NonZero, Eq)):
+                hard.append(obj)
+            elif isinstance(obj, SoftEq):
+                soft.append(obj)
+    if True:
+        print_system(hard + soft)
+    each, x0 = make_vectored_context(hard + soft, context)
+    wrap = lambda x: VectoredContext(x0, x0.variables, {}, x)
+    def f(x):
+        x = wrap(x)
+        return np.array([a.evaluate(x) for a in hard], float)
+    def g(x):
+        x = wrap(x)
+        return np.array([a.evaluate(x) for a in soft], float)
+    g_w = np.array([a.weight for a in soft], float)
+    return f, g, g_w, x0.x.copy(), wrap
+
+def make_vectored_context(system, context):
+    each, symbols = all_variables(system)
+    variables = {}
+    vector  = []
+    for sym in symbols:
+        variables[sym] = len(vector)
+        try:
+            vector.append(context[sym])
+        except KeyError:
+            vector.append(0.0)
+    return each, VectoredContext(None, variables, {}, np.array(vector, float))
 
 def approximate_jacobian(f, eps=1e-8):
     def jac(xi):

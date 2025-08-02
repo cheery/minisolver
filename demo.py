@@ -1,32 +1,31 @@
-from solver.solve import approximate_jacobian, analyze, solve_soft
+from solver.expressions import *
+from solver.solve import setup, approximate_jacobian, analyze, solve_soft
+from solver import two
 import pygame
 import numpy as np
 import math
 import weakref
 
-from solver.common import variables, setup, scalar, constant, variable, zero, one, expand, expr
-from solver import two
-
 def solve_constraints(dragging=None):
-    constrs = constraints[:]
+    entities = list(all_entities(sketch))
     mx, my = pygame.mouse.get_pos()
-    if isinstance(dragging, two.point):
-        p = two.point(constant(mx), constant(my))
-        constrs.append(two.drag(dragging, p))
-    elif isinstance(dragging, two.line):
-        p = two.point(constant(mx), constant(my))
-        q = two.point(variable(), variable())
-        constrs.append(two.drag(p, q))
-        constrs.append(two.coincident(q, dragging))
-    f, g, g_w, x0, interp = setup(constrs, vari)
+    if isinstance(dragging, two.Point):
+        p = two.Point(Constant(mx), Constant(my))
+        entities.append(two.Drag(dragging, p))
+    elif isinstance(dragging, two.Line):
+        p = two.Point(Constant(mx), Constant(my))
+        q = two.Point(Symbol(), Symbol())
+        entities.append(two.Drag(p, q))
+        entities.append(two.Coincident(q, dragging))
+    f, g, g_w, x0, wrap = setup(entities, context)
     jac = approximate_jacobian(f)
     soft_jac = approximate_jacobian(g)
     try:
         sol = solve_soft(f, jac, g, soft_jac, g_w, x0)
-        variables = interp(sol)
-        for var in variables.mapping:
-            vari.mapping[var] = variables[var]
-        vari.memo.clear()
+        ctx = wrap(sol)
+        for var in ctx.variables:
+            context.variables[var] = ctx[var]
+        context.memo.clear()
         return analyze(jac(sol))[0] == 0
     except:
         import traceback
@@ -43,16 +42,12 @@ font   = pygame.font.SysFont('Arial', 16)
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 clock  = pygame.time.Clock()
 
-vari   = variables(weakref.WeakKeyDictionary(), {})
-sketch = []
-constraints = []
+context = JustContext(None, weakref.WeakKeyDictionary(), {})
+sketch  = []
 
 def erase_derived(entity):
-    for xx in constraints[:]:
-        if entity in expand([xx], expr):
-            constraints.remove(xx)
     for yy in sketch[:]:
-        if entity in expand([yy], expr):
+        if entity in all_entities([yy]):
             sketch.remove(yy)
 
 def line_rect_intersection(orient, distance, rect):
@@ -96,24 +91,24 @@ while running:
             mods = pygame.key.get_mods()
             shift_held = mods & pygame.KMOD_SHIFT
             if ev.button == 1 and shift_held:
-                x = constant(ev.pos[0])
-                y = constant(ev.pos[1])
-                sketch.append(two.point(x, y))
+                x = Constant(ev.pos[0])
+                y = Constant(ev.pos[1])
+                sketch.append(two.Point(x, y))
             elif ev.button == 1:
-                x = variable()
-                y = variable()
-                vari.mapping[x] = ev.pos[0]
-                vari.mapping[y] = ev.pos[1]
-                sketch.append(two.point(x, y))
+                x = Symbol()
+                y = Symbol()
+                context.variables[x] = ev.pos[0]
+                context.variables[y] = ev.pos[1]
+                sketch.append(two.Point(x, y))
             elif ev.button == 2:
-                x = variable()
-                y = variable()
-                z = variable()
-                vari.mapping[x] = 1
-                vari.mapping[y] = 0
-                vari.mapping[z] = -ev.pos[0]
-                n = two.free_normal(x, y)
-                sketch.append(two.line(n, z))
+                x = Symbol()
+                y = Symbol()
+                z = Symbol()
+                context.variables[x] = 1
+                context.variables[y] = 0
+                context.variables[z] = -ev.pos[0]
+                n = two.Normal(x, y)
+                sketch.append(two.Line(n, z))
             elif ev.button == 3 and highlight is not None:
                 sketch.remove(highlight)
                 erase_derived(highlight)
@@ -125,10 +120,15 @@ while running:
             elif len(sketch):
                 m = np.array(ev.pos)
                 def dfn(p):
-                    if isinstance(p, two.line):
-                        return two.point_line_distance(m, *vari[p]) * 2.0
-                    elif isinstance(p, two.point):
-                        return np.linalg.norm(vari[p] - m) * 1.0
+                    if isinstance(p, two.Line):
+                        x = context.compute(p.vector.x)
+                        y = context.compute(p.vector.y)
+                        d = context.compute(p.scalar)
+                        return two.point_line_distance(m, np.array((x,y)), d) * 2.0
+                    elif isinstance(p, two.Point):
+                        x = context.compute(p.x)
+                        y = context.compute(p.y)
+                        return np.linalg.norm((x,y) - m) * 1.0
                     return np.inf
                 highlight = min(sketch, key=dfn)
             else:
@@ -137,24 +137,25 @@ while running:
             blight = alight
             alight = highlight
         elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_s:
-            if isinstance(highlight, two.line) and isinstance(alight, two.point):
-                constraints.append(two.coincident(alight, highlight))
+            if isinstance(highlight, two.Line) and isinstance(alight, two.Point):
+                sketch.append(two.Coincident(alight, highlight))
                 highlight = alight = blight = None
         elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_w:
-            if isinstance(highlight, two.point) and isinstance(alight, two.point):
-                d = constant(np.linalg.norm(vari[highlight] - vari[alight]))
-                if isinstance(blight, two.line):
-                    along = blight.orient
+            if isinstance(highlight, two.Point) and isinstance(alight, two.Point):
+                d = Constant(100)
+                if isinstance(blight, two.Line):
+                    along = blight.vector
                 else:
-                    along = two.normal_between(highlight, alight)
-                constraints.append(two.distance(d, highlight, alight, along))
+                    along = highlight - alight
+                sketch.append(two.Distance(d, highlight, alight, along))
                 highlight = alight = blight = None
         elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_e:
-            if isinstance(highlight, two.point) and isinstance(alight, two.point) and isinstance(blight, two.point):
-                n = two.normal_between(highlight, alight)
-                m = two.normal_between(highlight, blight)
-                s = constant(value=two.angle_of(vari[n], vari[m]))
-                constraints.append(two.phi(s, n, m))
+            if isinstance(highlight, two.Point) and isinstance(alight, two.Point) and isinstance(blight, two.Point):
+                n = highlight - alight
+                m = highlight - blight
+                #s = constant(value=two.angle_of(vari[n], vari[m]))
+                s = Constant(math.pi * 0.25)
+                sketch.append(two.Phi(s, n, m))
                 highlight = alight = blight = None
         elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_SPACE:
             green = solve_constraints(highlight)
@@ -168,22 +169,16 @@ while running:
             color = (0, 255, 255)
         if blight is entity:
             color = (255, 0, 255)
-        if isinstance(entity, two.point):
-            pos = vari[entity]
-            pygame.draw.circle(screen, color, pos, 2)
-            #if entity.group == None and type(entity) == two.point:
-            #    x, y = entity.pos
-            #    pygame.draw.line(screen, color, (x-4, y-4), (x+4, y+4))
-            #    pygame.draw.line(screen, color, (x-4, y+4), (x+4, y-4))
-        #if isinstance(entity, two.point_on_line):
-        #    pygame.draw.circle(screen, (100, 100, 100), entity.pos, 6, 1)
-        if isinstance(entity, two.line):
-            orient, distance = vari[entity]
-            s = line_rect_intersection(orient, distance, screen.get_rect())
+        if isinstance(entity, two.Point):
+            x = context.compute(entity.x)
+            y = context.compute(entity.y)
+            pygame.draw.circle(screen, color, (x,y), 2)
+        if isinstance(entity, two.Line):
+            x = context.compute(entity.vector.x)
+            y = context.compute(entity.vector.y)
+            d = context.compute(entity.scalar)
+            s = line_rect_intersection((x,y), d, screen.get_rect())
             if len(s) == 2:
-                #if entity.group == None and type(entity) == two.line:
-                #    pygame.draw.line(screen, color, s[0], s[1], 3)
-                #else:
                 pygame.draw.line(screen, color, s[0], s[1], 1)
 
     if green:

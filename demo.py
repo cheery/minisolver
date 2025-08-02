@@ -15,20 +15,23 @@ def solve_constraints(dragging=None):
         constrs.append(two.drag(dragging, p))
     elif isinstance(dragging, two.line):
         p = two.point(constant(mx), constant(my))
-        constrs.append(two.coincident(p, dragging))
-    f, g, x0, interp = setup(constrs, vari)
+        q = two.point(variable(), variable())
+        constrs.append(two.drag(p, q))
+        constrs.append(two.coincident(q, dragging))
+    f, g, g_w, x0, interp = setup(constrs, vari)
     jac = approximate_jacobian(f)
     soft_jac = approximate_jacobian(g)
     try:
-        sol = solve_soft(f, jac, g, soft_jac, x0)
+        sol = solve_soft(f, jac, g, soft_jac, g_w, x0)
         variables = interp(sol)
         for var in variables.mapping:
             vari.mapping[var] = variables[var]
         vari.memo.clear()
-#       print(analyze(jac(sol)))
+        return analyze(jac(sol))[0] == 0
     except:
         import traceback
         traceback.print_exc()
+        return False
 
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
@@ -79,6 +82,7 @@ def line_rect_intersection(orient, distance, rect):
             unique.append(p)
     return unique
 
+green = True
 alight = None
 blight = None
 highlight = None
@@ -117,7 +121,7 @@ while running:
         elif ev.type == pygame.MOUSEMOTION:
             pressed = pygame.key.get_pressed()
             if pressed[pygame.K_SPACE]:
-                solve_constraints(highlight)
+                green = solve_constraints(highlight)
             elif len(sketch):
                 m = np.array(ev.pos)
                 def dfn(p):
@@ -153,7 +157,7 @@ while running:
                 constraints.append(two.phi(s, n, m))
                 highlight = alight = blight = None
         elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_SPACE:
-            solve_constraints(highlight)
+            green = solve_constraints(highlight)
 
     screen.fill((30, 30, 30))
     for entity in sketch:
@@ -181,6 +185,9 @@ while running:
                 #    pygame.draw.line(screen, color, s[0], s[1], 3)
                 #else:
                 pygame.draw.line(screen, color, s[0], s[1], 1)
+
+    if green:
+        pygame.draw.line(screen, (0, 255, 0), (0, 0), (SCREEN_WIDTH, 0), 5)
 
 #    for group, flavor, amount in constraints:
 #        points = tuple(sketch[i] for i in group)

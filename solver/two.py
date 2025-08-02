@@ -65,11 +65,12 @@ class drag(constraint):
     a : point
     b : point
 
+    soft_weights = (100,)
     def soft(self, x, _):
         a = x[self.a]
         b = x[self.b]
         d = a - b
-        yield (d @ d) * 1000.0
+        yield np.sqrt(d @ d)
 
 @dataclass(eq=False)
 class coincident(constraint):
@@ -110,6 +111,8 @@ class phi(constraint):
     a : scalar
     n : normal
     m : normal
+    #_a : variable = field(default_factory=lambda: variable(10))
+    #_b : variable = field(default_factory=lambda: variable(10))
 
     def hard(self, x, _):
         a = x[self.a]
@@ -123,13 +126,14 @@ class phi(constraint):
         else:
             yield 1
 
+    soft_weights = (0.1, 0.1)
     def soft(self, x, x0):
         n0 = x0[self.n]
         m0 = x0[self.m]
         n = x[self.n]
         m = x[self.m]
-        yield np.linalg.norm(n0) - np.linalg.norm(n)
-        yield np.linalg.norm(m0) - np.linalg.norm(m)
+        yield (np.linalg.norm(n0) - np.linalg.norm(n))
+        yield (np.linalg.norm(m0) - np.linalg.norm(m))
 
 def angle_of(n, m):
     magn = np.linalg.norm(n)

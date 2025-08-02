@@ -15,6 +15,17 @@ def approximate_jacobian(f, eps=1e-8):
         return J
     return jac
 
+def truncated_pinv(A, rcond=None):
+    """Compute pseudoinverse with truncated SVD"""
+    U, s, Vh = np.linalg.svd(A, full_matrices=False)
+    if rcond is None:
+        rcond = np.finfo(s.dtype).eps * max(A.shape)
+    tol = np.amax(s) * rcond
+    mask = s > tol
+    s_inv = np.zeros_like(s)
+    s_inv[mask] = 1.0 / s[mask]
+    return Vh.T @ (s_inv[:, None] * U.T)
+
 def null_space(A, rcond=None):
     u, s, vh = np.linalg.svd(A, full_matrices=True)
     M, N = u.shape[0], vh.shape[1]
@@ -25,75 +36,96 @@ def null_space(A, rcond=None):
     Q = vh[num:,:].T.conj()
     return Q
 
-def analyze(J, tol=1e-6):
-    U, S, Vt = np.linalg.svd(J, full_matrices=True)
+def analyze(J, rcond=None):
+    k = J.shape[1]
+    u, s, vh = np.linalg.svd(J, full_matrices=True)
     # Count singular values > tol → rank
-    rank = np.sum(S > tol)
+    M, N = u.shape[0], vh.shape[1]
+    if rcond is None:
+        rcond = np.finfo(s.dtype).eps * max(M, N)
     # Nullity = #columns - rank
-    n = J.shape[1]
-    nullity = n - rank
+    if s.size == 0:
+        tol = 0
+        rank = 0
+        nullity = k
+    else:
+        tol = np.amax(s) * rcond
+        rank = np.sum(s > tol, dtype=int)
+        nullity = k - rank
     
     movable = []
     # Nullspace basis = last `nullity` columns of V = rows of Vt.T
     if nullity > 0:
-        nullspace = Vt.T[:, rank:]
+        nullspace = vh[rank:,:].T.conj()
+        #nullspace = Vt.T[:, rank:]
         # Find which variable indices have any significant component
         # across the nullspace basis vectors
-        for i in range(n):
+        for i in range(k):
             # Compute the L2 norm of row i of `nullspace`
             comp_norm = np.linalg.norm(nullspace[i, :])
             if comp_norm > tol:
                 movable.append(i)
     else:
-        nullspace = np.zeros((n, 0))
+        nullspace = np.zeros((k, 0))
     
     return int(nullity), movable
 
 class NoConvergence(Exception):
     pass
 
-def solve_soft(f, f_jac, g, g_jac, x, tol=1e-6, max_iterations=100, nudge=1e-2):
-    x = constrain(g, g_jac, x, tol, 10, nudge)[0]
-    x, f_norm = constrain(f, f_jac, x, tol, max_iterations, nudge)
-    if f_norm >= tol:
-        raise NoConvergence
-    try:
-        n = x.size
+def solve_soft(f, f_jac, g, g_jac, g_w, x, tol=1e-6, max_iterations=100, nudge=1e-2):
+    def H(x):
+        return np.linalg.norm(f(x)) + np.linalg.norm(g(x) * g_w)
+    def Q(A, B):
+        A_T = A.T
+        return np.linalg.pinv(A_T @ A) @ A_T @ B
+    def R(A, B, w):
+        W = np.diag(w)
+        A_T = A.T
+        Aw = A_T @ W @ A + np.eye(A.shape[1])
+        Bw = A_T @ W @ B
+        return np.linalg.pinv(Aw) @ Bw
+    fi = f(x)
+    g_norm = g_norm_prev = np.linalg.norm(gi := g(x), ord=np.inf)
+    for k in range(max_iterations):
+        if g_norm < tol:
+            return enforce(f, f_jac, x, tol, max_iterations, nudge)
+        J_h = f_jac(x)
+        J_s = g_jac(x)
+        if J_h.size > 0:
+            dx = Q(J_h, -fi)
+            N = null_space(J_h)
+            if N.size > 0:
+                # Project soft constraints into null space
+                J_s_null = J_s @ N
+                gi = gi + J_s @ dx
+                dx_soft = N @ R(J_s_null, -gi, g_w)
+                dx += dx_soft
+            while H(x+dx*0.5) < H(x+dx):
+                dx *= 0.5
+            x += dx
+        else:
+            dx = R(J_s, -gi, g_w)
+            while H(x+dx*0.5) < H(x+dx):
+                dx *= 0.5
+            x += dx
         fi = f(x)
-        gi = g(x)
-        f_norm = np.linalg.norm(fi, ord=np.inf)
-        g_norm = np.linalg.norm(gi, ord=np.inf)
-        x_best = x.copy()
-        g_best = g_norm
-        for k in range(25):
-            if f_norm < tol and g_norm < tol:
-                return x
-            J_h = f_jac(x)
-            J_s = g_jac(x)
-            if fi.size > 0:
-                dx = perform_solver_step(fi, J_h)
-                x += dx
-                N = null_space(J_h)
-                if N.size > 0:
-                    # Project soft constraints into null space
-                    J_s_null = J_s @ N
-                    # Compute step in null space (minimize soft constraints)
-                    gi = gi + J_s.dot(dx)
-                    dx_soft = N @ perform_solver_step(gi, J_s_null)
-                    x += dx_soft
-            else:
-                x += perform_solver_step(gi, J_s)
+        g_norm = np.linalg.norm(gi := g(x), ord=np.inf)
+        if g_norm_prev - g_norm < tol:
+            return enforce(f, f_jac, x, tol, max_iterations, nudge)
+        g_norm_prev = g_norm
+    return enforce(f, f_jac, x, tol, max_iterations, nudge)
 
-            f_norm = np.linalg.norm(fi := f(x), ord=np.inf)
-            g_norm = np.linalg.norm(gi := g(x), ord=np.inf)
-            if f_norm < tol and g_norm < g_best:
-                x_best[:] = x
-    except np.linalg.LinAlgError as e:
-        import traceback
-        traceback.print_exc()
-    return x_best
+def enforce(f, f_jac, x, tol=1e-6, max_iterations=100, nudge=1e-2):
+    x, f_norm = constrain(f, f_jac, x, tol, max_iterations, nudge)
+    if f_norm < tol:
+        return x
+    else:
+        raise NoConvergence
 
 def constrain(f, jac, x, tol=1e-6, max_iterations=100, nudge=1e-2):
+    def F(x):
+        return np.linalg.norm(f(x))
     n = x.size
     fi = f(x)
     f_norm = np.linalg.norm(fi, ord=np.inf)
@@ -101,71 +133,17 @@ def constrain(f, jac, x, tol=1e-6, max_iterations=100, nudge=1e-2):
     for i in range(max_iterations):
         if f_norm < tol:
             return x, f_norm
-        x += perform_solver_step(fi, jac(x))
-
+        J = jac(x)
+        J_T = J.T
+        A = J_T @ J
+        B = J_T @ -fi
+        dx = np.linalg.pinv(A) @ B
+        while F(x+dx*0.5) < F(x+dx):
+            dx *= 0.5
+        x += dx
         fi = f(x)
         f_norm = np.linalg.norm(fi, ord=np.inf)
-        if f_norm >= f_norm_prev:
+        if f_norm_prev - f_norm < tol:
             x += np.random.uniform(-nudge, +nudge, n)
         f_norm_prev = f_norm
     return x, f_norm
-
-def perform_solver_step(fi, J, lambda_factor=10.0, max_lambda=1e10):
-    return np.linalg.lstsq(J, -fi)[0]
-
-def perform_solver_step2(fi, J, f, x):
-    alpha0 = 1.0
-    rho    = 0.5
-    c      = 1e-4
-    dx = np.linalg.lstsq(J, -fi)[0]
-    f_norm = np.linalg.norm(fi)
-    alpha = alpha0
-    while True:
-        x_new = x + alpha * dx
-        if np.linalg.norm(f(x_new)) <= (1 - c * alpha) * f_norm:
-            break
-        alpha *= rho
-    return alpha*dx
-
-    # This would seem interesting but
-    # the condition of the matrix explodes as the result.
-    # Adaptive Levenberg-Marquardt
-    n = J.shape[1]
-    lm_lambda = 1e-3
-    best_dx = None
-    best_norm = np.inf
-    
-    print("COND (ORIG)", np.linalg.cond(J))
-    while lm_lambda < max_lambda:
-        J_lm = J.T @ J + lm_lambda * np.eye(n)
-        grad = J.T @ fi
-        print("COND", np.linalg.cond(J_lm))
-
-        #try:
-        dx = np.linalg.solve(J_lm, -grad)
-        #except np.linalg.LinAlgError:
-        #dx = np.linalg.lstsq(J_lm, -grad, rcond=None)[0]
-        
-        # Accept step if it reduces residual
-        residual_norm = np.linalg.norm(J @ dx + fi, 2)
-        if residual_norm < best_norm:
-            best_dx = dx
-            best_norm = residual_norm
-            lm_lambda /= lambda_factor
-            break
-        else:
-            lm_lambda *= lambda_factor
-    
-    return best_dx if best_dx is not None else dx
-
-# Add this in if needed.
-# Armijo
-#         alpha = alpha0
-#         if damping:
-#             f_norm = np.linalg.norm(fi)
-#             while True:
-#                 x_new = x + alpha * dx
-#                 if np.linalg.norm(f(x_new)) <= (1 - c * alpha) * f_norm:
-#                     break
-#                 alpha *= rho
-#         step = alpha * dx if damping else dx

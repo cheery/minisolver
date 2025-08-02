@@ -15,6 +15,9 @@ class variables:
             self.memo[o] = v = o.evaluate(self)
             return v
 
+    def has_var(self, var):
+        return var in self.mapping
+
 @dataclass(eq=False)
 class variablesvector:
     mapping : Dict['variable', int]
@@ -45,7 +48,11 @@ def setup(constraints, p):
         for expr in constraints:
             out.extend(expr.soft(x, x0))
         return np.array(out, float)
-    return f, g, x0.vector.copy(), mangle
+    g_w = []
+    for a in constraints:
+        g_w.extend(a.soft_weights)
+    g_w = np.array(g_w, float)
+    return f, g, g_w, x0.vector.copy(), mangle
 
 def collect_variables(constraints, p):
     mapping = {}
@@ -53,7 +60,7 @@ def collect_variables(constraints, p):
     for a in expand(constraints, (expr, scalar)):
         if isinstance(a, variable):
             mapping[a] = len(vector)
-            vector.append(p[a])
+            vector.append(p[a] if p.has_var(a) else 0.0)
     return variablesvector(mapping, {}, np.array(vector, float))
 
 def expand(args, ty):
@@ -90,6 +97,7 @@ class expr:
     def hard(self, x, x0):
         return iter(())
 
+    soft_weights = ()
     def soft(self, x, x0):
         return iter(())
 

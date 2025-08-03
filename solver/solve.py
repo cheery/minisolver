@@ -31,6 +31,8 @@ def setup(entities, context):
         for i, a in enumerate(hard):
             if isinstance(a, Eq):
                 f = (a.lhs - a.rhs).evaluate(y)
+                if isinstance(f, float):
+                    continue
                 for sym, d in f.partials.items():
                     out[i, x.variables[sym]] += d
         return out
@@ -44,14 +46,18 @@ def setup(entities, context):
         variables = {}
         for sym in x.variables:
             variables[sym] = dual(sym, x[sym])
-        y = JustContext(None, variables, {})
+        y = JustContext(x0, variables, {})
         out = np.zeros((m,n), float)
         for i, a in enumerate(soft):
             if isinstance(a, SoftEq):
                 f = (a.lhs - a.rhs).evaluate(y)
+                if isinstance(f, float):
+                    continue
                 for sym, d in f.partials.items():
                     out[i, x.variables[sym]] += d
         return out
+    f_jac = approximate_jacobian(f)
+    g_jac = approximate_jacobian(g)
     g_w = np.array([a.weight for a in soft], float)
     return f, f_jac, g, g_jac, g_w, x0.x.copy(), wrap
 

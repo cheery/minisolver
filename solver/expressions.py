@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, fields
 from typing import List, Dict, Optional, Callable, Tuple, Any, Set, Union
 import math
@@ -20,35 +20,35 @@ class Expr:
 
     def __add__(self, other):
         other = convert(other)
-        return distribute(self, other, Add)
+        return distribute(self, other, add)
 
     def __radd__(self, other):
         other = convert(other)
-        return distribute(other, self, Add)
+        return distribute(other, self, add)
 
     def __sub__(self, other):
         other = convert(other)
-        return distribute(self, other, lambda lhs, rhs: Add(lhs, Neg(rhs)))
+        return distribute(self, other, lambda lhs, rhs: add(lhs, neg(rhs)))
 
     def __rsub__(self, other):
         other = convert(other)
-        return distribute(other, self, lambda lhs, rhs: Add(lhs, Neg(rhs)))
+        return distribute(other, self, lambda lhs, rhs: add(lhs, neg(rhs)))
 
     def __mul__(self, other):
         other = convert(other)
-        return distribute(self, other, Mul)
+        return distribute(self, other, mul)
 
     def __rmul__(self, other):
         other = convert(other)
-        return distribute(other, self, Mul)
+        return distribute(other, self, mul)
 
     def __truediv__(self, other):
         other = convert(other)
-        return distribute(self, other, lambda lhs, rhs: Mul(lhs, Inv(rhs)))
+        return distribute(self, other, lambda lhs, rhs: mul(lhs, inv(rhs)))
 
     def __rtruediv__(self, other):
         other = convert(other)
-        return distribute(other, self, lambda lhs, rhs: Mul(lhs, Inv(rhs)))
+        return distribute(other, self, lambda lhs, rhs: mul(lhs, inv(rhs)))
 
     def evaluate(self, context):
         attrs = {}
@@ -56,12 +56,16 @@ class Expr:
             attrs[f.name] = context.compute(getattr(self, f.name))
         return type(self)(**attrs)
 
-# TODO: subexpressions(self)
+    def subexpressions(self):
+        for f in fields(self):
+            a = getattr(self, f.name)
+            if isinstance(a, Expr):
+                yield a
 
 @dataclass(eq=False)
 class Scalar(Expr):
     def __neg__(self):
-        return Neg(self)
+        return neg(self)
 
 @dataclass(eq=False)
 class Symbol(Scalar):
@@ -118,50 +122,38 @@ class Previous(Unary):
             return self
 
 @dataclass(eq=False)
-class Neg(Unary):
-    precedence = 10
-    def op(self, scalar):
-        return -scalar
-
-    def stringify(self, s):
-        return f"-{s(self.scalar)}"
-
-    def dop(self, scalar, dscalar, result):
-        return -dscalar
-
-@dataclass(eq=False)
-class Inv(Unary):
+class PowN(Unary):
+    power : float
     precedence = 20
     def stringify(self, s):
-        return f"1 / {s(self.scalar)}"
-
-    def op(self, scalar):
-        if scalar > 1e-12:
-            return 1 / scalar
+        if self.power < 0:
+            return f"1 / {s(PowN(self.scalar, -self.power), 19)}"
+        elif self.power == 1:
+            return f"{s(self.scalar, 20)}"
         else:
-            raise Unsatisfiable
-
-    def dop(self, scalar, dscalar, result):
-        if scalar < 1e-12:
-            raise Nondifferentiable
-        return -dscalar / sqr(scalar)
-
-@dataclass(eq=False)
-class Sqr(Unary):
-    def stringify(self, s):
-        return f"Sqr({s(self.scalar)})"
+            return f"{s(self.scalar, 20)}**{self.power}"
 
     def op(self, scalar):
-        return scalar*scalar
+        if self.power < 0 and scalar < 1e-12:
+            raise Unsatisfiable
+        return scalar ** self.power
 
     def dop(self, scalar, dscalar, result):
-        return 2 * scalar * dscalar
+        if self.power <= 0 and scalar < 1e-12:
+            raise Nondifferentiable
+        return dscalar * self.power * (scalar ** (self.power-1))
+
+def inv(obj):
+    if isinstance(obj, Expr):
+        return PowN(obj, -1)
+    elif float(obj) < 1e-12:
+        return PowN(Product(0, []), -1)
+    else:
+        return 1.0 / float(obj)
 
 def sqr(obj):
-    if isinstance(obj, Scalar):
-        return Sqr(obj)
-    elif isinstance(obj, Compound):
-        return obj.distribute(sqr)
+    if isinstance(obj, Expr):
+        return PowN(obj, 2)
     else:
         return float(obj)**2
 
@@ -245,40 +237,152 @@ class Binary(Scalar):
             return self.op(lhs, rhs)
 
 @dataclass(eq=False)
-class Add(Binary):
+class Sum(Scalar):
+    terms : List[Scalar]
     precedence = 10
-    def stringify(self, s):
-        if isinstance(self.rhs, Neg):
-            return f"{s(self.lhs, 9)} - {s(self.rhs.scalar, 10)}"
+
+    def evaluate(self, context):
+        terms = [context.compute(term) for term in self.terms]
+        if any(isinstance(term, Dual) for term in terms):
+            result = []
+            partials = defaultdict(float)
+            for term in terms:
+                if isinstance(term, Dual):
+                    result.append(term.scalar)
+                    for sym, value in term.partials.items():
+                        partials[sym] += value
+                else:
+                    result.append(term)
+            return Dual(sum(result), partials)
         else:
-            return f"{s(self.lhs, 9)} + {s(self.rhs, 10)}"
+            return sum(terms)
 
-    def op(self, lhs, rhs):
-        return lhs + rhs
+    def subexpressions(self):
+        yield from self.terms
 
-    def dop(self, lhs, rhs, dlhs, drhs, result):
-        return dlhs + drhs
+    def stringify(self, s):
+        out = []
+        for term in self.terms:
+            if isinstance(term, Product) and term.constant < 0.0:
+                if out:
+                    out.append(" - ")
+                else:
+                    out.append("-")
+                out.append(term.stringify_factors(s))
+            else:
+                if out:
+                    out.append(" + ")
+                out.append(s(term, 10))
+        return "".join(out)
 
 @dataclass(eq=False)
-class Mul(Binary):
+class Product(Scalar):
+    constant : float
+    factors  : List[Scalar]
     precedence = 20
-    def stringify(self, s):
-        if isinstance(self.rhs, Inv):
-            return f"{s(self.lhs, 19)} / {s(self.rhs.scalar, 20)}"
+    def __float__(self):
+        if self.factors:
+            raise TypeError
+        return self.constant
+
+    def evaluate(self, context):
+        factors = [context.compute(factor) for factor in self.factors]
+        if any(isinstance(factor, Dual) for factor in factors):
+            result = self.constant
+            factors = []
+            pfactors = defaultdict(list)
+            for i, factor in enumerate(factors):
+                if isinstance(factor, Dual):
+                    result *= factor.scalar
+                    factors.append(factor.scalar)
+                    for sym, value in factor.partials.items():
+                        pfactors[sym].append((i, value))
+                else:
+                    result *= factor
+                    factors.append(factor)
+            partials = {}
+            for sym, xs in pfactors.items():
+                partials[sym] = product_derivative(factors, xs)
+            return Dual(result, partials)
         else:
-            return f"{s(self.lhs, 19)} * {s(self.rhs, 20)}"
+            result = self.constant
+            for factor in factors:
+                result *= factor
+            return result
 
-    def op(self, lhs, rhs):
-        return lhs * rhs
+    def subexpressions(self):
+        yield from self.factors
 
-    def dop(self, lhs, rhs, dlhs, drhs, result):
-        return dlhs*rhs + lhs*drhs
+    def stringify(self, s):
+        prefix = "-" if self.constant < 0.0 else ""
+        return prefix + self.stringify_factors(s)
+
+    def stringify_factors(self, s):
+        out = []
+        if abs(self.constant) != 1:
+            out.append(str(abs(self.constant)))
+        for factor in self.factors:
+            out.append(s(factor, 20))
+        if not out:
+            out.append("1.0")
+        return "*".join(out)
+
+def product_derivative(xs, p):
+    total = 0.0
+    for i,x in p:
+        for j in range(len(xs)):
+            if i != j:
+                x *= xs[j]
+        total += x
+    return total
+
+def add(lhs, rhs):
+    terms = []
+    if isinstance(lhs, Sum):
+        terms.extend(lhs.terms)
+    else:
+        terms.append(lhs)
+    if isinstance(rhs, Sum):
+        terms.extend(rhs.terms)
+    else:
+        terms.append(rhs)
+    constant = 0
+    for term in terms[:]:
+        if isinstance(term, Product) and not term.factors:
+            constant += term.constant
+            terms.remove(term)
+    if constant != 0.0:
+        terms.append(Product(constant, []))
+    return Sum(terms)
+
+def neg(term):
+    if isinstance(term, Sum):
+        return Sum(neg(t) for t in term.terms)
+    elif isinstance(term, Product):
+        return Product(-term.constant, term.factors)
+    else:
+        return Product(-1, [term])
+
+def mul(lhs, rhs):
+    constant = 1.0
+    factors  = []
+    if isinstance(lhs, Product):
+        constant *= lhs.constant
+        factors.extend(lhs.factors)
+    else:
+        factors.append(lhs)
+    if isinstance(rhs, Product):
+        constant *= rhs.constant
+        factors.extend(rhs.factors)
+    else:
+        factors.append(rhs)
+    return Product(constant, factors)
 
 def convert(obj):
     if isinstance(obj, Expr):
         return obj
     else:
-        return Constant(obj)
+        return Product(float(obj), [])
 
 def distribute(lhs, rhs, operand):
     if isinstance(lhs, Scalar) and isinstance(rhs, Scalar):
@@ -372,7 +476,7 @@ class Entity(Expr):
 @dataclass(eq=False)
 class Compound(Entity):
     def __neg__(self):
-        return self.distribute(Neg)
+        return self.distribute(neg)
 
 @dataclass(eq=False)
 class EvaluationContext:
@@ -426,10 +530,8 @@ def all_exprs(system):
     def visit(expr):
         if expr not in visited:
             visited.add(expr)
-            for f in fields(expr):
-                a = getattr(expr, f.name)
-                if isinstance(a, Expr):
-                    visit(a)
+            for a in expr.subexpressions():
+                visit(a)
     for expr in system:
         visit(expr)
     return visited
@@ -446,10 +548,8 @@ def all_variables(system):
             return out[expr]
         else:
             out[expr] = s = set()
-            for f in fields(expr):
-                a = getattr(expr, f.name)
-                if isinstance(a, Expr):
-                    s.update(get_variables(a))
+            for a in expr.subexpressions():
+                s.update(get_variables(a))
             return s
     total = set()
     for expr in system:
@@ -462,9 +562,8 @@ def print_system(system):
     def visit(expr):
         counter[expr] += 1
         if counter[expr] <= 1:
-            for f in fields(expr):
-                a = getattr(expr, f.name)
-                if isinstance(a, Expr) and not isinstance(a, Constant):
+            for a in expr.subexpressions():
+                if not (isinstance(a, Product) and not a.factors):
                     visit(a)
             postorder.append(expr)
     for expr in system:
@@ -492,15 +591,28 @@ def print_system(system):
         elif expr in system:
             print(f" ", expr.stringify(system_repr))
 
-zero = Constant(0.0)
-one  = Constant(1.0)
+zero = Product(0.0, [])
+one  = Product(1.0, [])
 
 @dataclass(eq=False)
 class Dual(Scalar):
     scalar   : float | Scalar
     partials : Dict[Symbol, float | Scalar]
 
-# TODO: evaluate & subexpressions
+    def evaluate(self, context):
+        scalar = context.compute(self.scalar)
+        partials = {}
+        for sym, value in self.partials.items():
+            partials[sym] = context.compute(value)
+        return Dual(scalar, partials)
+
+    def subexpressions(self):
+        if isinstance(self.scalar, Expr):
+            yield self.scalar
+        for sym, value in self.partials.items():
+            yield sym
+            if isinstance(value, Expr):
+                yield value
 
     def stringify(self, s):
         components = []

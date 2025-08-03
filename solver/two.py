@@ -35,7 +35,7 @@ def dot(a, b):
     return a.x*b.x + a.y*b.y
 
 def mag(v):
-    return Sqrt(Sqr(v.x) + Sqr(v.y))
+    return Sqrt(sqr(v.x) + sqr(v.y))
 
 @dataclass(eq=False)
 class Point(Vector):

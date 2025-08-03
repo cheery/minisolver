@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable, Tuple, Any, Set, Union
 from .expressions import *
-#from .common import expr, scalar, variable, constraint, zero, one, abs, acos, prev, sqr, sqrt
 import numpy as np
 import math
 

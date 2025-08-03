@@ -10,16 +10,14 @@ def solve_constraints(dragging=None):
     entities = list(all_entities(sketch))
     mx, my = pygame.mouse.get_pos()
     if isinstance(dragging, two.Point):
-        p = two.Point(Constant(mx), Constant(my))
+        p = two.Point(mx, my)
         entities.append(two.Drag(dragging, p))
     elif isinstance(dragging, two.Line):
-        p = two.Point(Constant(mx), Constant(my))
+        p = two.Point(mx, my)
         q = two.Point(Symbol(), Symbol())
         entities.append(two.Drag(p, q))
         entities.append(two.Coincident(q, dragging))
-    f, g, g_w, x0, wrap = setup(entities, context)
-    jac = approximate_jacobian(f)
-    soft_jac = approximate_jacobian(g)
+    f, jac, g, soft_jac, g_w, x0, wrap = setup(entities, context)
     try:
         sol = solve_soft(f, jac, g, soft_jac, g_w, x0)
         ctx = wrap(sol)
@@ -91,24 +89,16 @@ while running:
             mods = pygame.key.get_mods()
             shift_held = mods & pygame.KMOD_SHIFT
             if ev.button == 1 and shift_held:
-                x = Constant(ev.pos[0])
-                y = Constant(ev.pos[1])
-                sketch.append(two.Point(x, y))
+                sketch.append(two.Point(*ev.pos))
             elif ev.button == 1:
-                x = Symbol()
-                y = Symbol()
-                context.variables[x] = ev.pos[0]
-                context.variables[y] = ev.pos[1]
+                x = context.abstract(ev.pos[0])
+                y = context.abstract(ev.pos[1])
                 sketch.append(two.Point(x, y))
             elif ev.button == 2:
-                x = Symbol()
-                y = Symbol()
-                z = Symbol()
-                context.variables[x] = 1
-                context.variables[y] = 0
-                context.variables[z] = -ev.pos[0]
-                n = two.Normal(x, y)
-                sketch.append(two.Line(n, z))
+                x = context.abstract(1)
+                y = context.abstract(0)
+                z = context.abstract(-ev.pos[0])
+                sketch.append(two.Line(two.Normal(x, y), z))
             elif ev.button == 3 and highlight is not None:
                 sketch.remove(highlight)
                 erase_derived(highlight)
@@ -142,20 +132,18 @@ while running:
                 highlight = alight = blight = None
         elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_w:
             if isinstance(highlight, two.Point) and isinstance(alight, two.Point):
-                d = Constant(100)
                 if isinstance(blight, two.Line):
                     along = blight.vector
                 else:
                     along = highlight - alight
-                sketch.append(two.Distance(d, highlight, alight, along))
+                sketch.append(two.Distance(100, highlight, alight, along))
                 highlight = alight = blight = None
         elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_e:
             if isinstance(highlight, two.Point) and isinstance(alight, two.Point) and isinstance(blight, two.Point):
                 n = highlight - alight
                 m = highlight - blight
                 #s = constant(value=two.angle_of(vari[n], vari[m]))
-                s = Constant(math.pi * 0.25)
-                sketch.append(two.Phi(s, n, m))
+                sketch.append(two.Phi(math.pi * 0.25, n, m))
                 highlight = alight = blight = None
         elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_SPACE:
             green = solve_constraints(highlight)
@@ -174,9 +162,10 @@ while running:
             y = context.compute(entity.y)
             pygame.draw.circle(screen, color, (x,y), 2)
         if isinstance(entity, two.Line):
-            x = context.compute(entity.vector.x)
-            y = context.compute(entity.vector.y)
-            d = context.compute(entity.scalar)
+            line = context.compute(entity)
+            x = float(line.vector.x)
+            y = float(line.vector.y)
+            d = float(line.scalar)
             s = line_rect_intersection((x,y), d, screen.get_rect())
             if len(s) == 2:
                 pygame.draw.line(screen, color, s[0], s[1], 1)

@@ -1,4 +1,4 @@
-from .expressions import NonZero, Eq, SoftEq, print_system, all_variables, VectoredContext
+from .expressions import NonZero, Eq, SoftEq, print_system, all_variables, JustContext, VectoredContext, dual
 import numpy as np
 import random
 import math
@@ -12,18 +12,48 @@ def setup(entities, context):
                 hard.append(obj)
             elif isinstance(obj, SoftEq):
                 soft.append(obj)
-    if True:
+    if False:
         print_system(hard + soft)
     each, x0 = make_vectored_context(hard + soft, context)
     wrap = lambda x: VectoredContext(x0, x0.variables, {}, x)
     def f(x):
         x = wrap(x)
         return np.array([a.evaluate(x) for a in hard], float)
+    def f_jac(x):
+        m = len(hard)
+        n = len(x)
+        x = wrap(x)
+        variables = {}
+        for sym in x.variables:
+            variables[sym] = dual(sym, x[sym])
+        y = JustContext(None, variables, {})
+        out = np.zeros((m,n), float)
+        for i, a in enumerate(hard):
+            if isinstance(a, Eq):
+                f = (a.lhs - a.rhs).evaluate(y)
+                for sym, d in f.partials.items():
+                    out[i, x.variables[sym]] += d
+        return out
     def g(x):
         x = wrap(x)
         return np.array([a.evaluate(x) for a in soft], float)
+    def g_jac(x):
+        m = len(soft)
+        n = len(x)
+        x = wrap(x)
+        variables = {}
+        for sym in x.variables:
+            variables[sym] = dual(sym, x[sym])
+        y = JustContext(None, variables, {})
+        out = np.zeros((m,n), float)
+        for i, a in enumerate(soft):
+            if isinstance(a, SoftEq):
+                f = (a.lhs - a.rhs).evaluate(y)
+                for sym, d in f.partials.items():
+                    out[i, x.variables[sym]] += d
+        return out
     g_w = np.array([a.weight for a in soft], float)
-    return f, g, g_w, x0.x.copy(), wrap
+    return f, f_jac, g, g_jac, g_w, x0.x.copy(), wrap
 
 def make_vectored_context(system, context):
     each, symbols = all_variables(system)
@@ -117,7 +147,7 @@ def solve_soft(f, f_jac, g, g_jac, g_w, x, tol=1e-6, max_iterations=100, nudge=1
     def R(A, B, w):
         W = np.diag(w)
         A_T = A.T
-        Aw = A_T @ W @ A + np.eye(A.shape[1])
+        Aw = A_T @ W @ A + np.eye(A.shape[1])*0.01
         Bw = A_T @ W @ B
         return np.linalg.pinv(Aw) @ Bw
     fi = f(x)

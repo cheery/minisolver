@@ -6,6 +6,9 @@ import math
 class Unsatisfiable(Exception):
     pass
 
+class Nondifferentiable(Exception):
+    pass
+
 @dataclass(eq=False)
 class Expr:
     precedence = 1000
@@ -47,6 +50,14 @@ class Expr:
         other = convert(other)
         return distribute(other, self, lambda lhs, rhs: Mul(lhs, Inv(rhs)))
 
+    def evaluate(self, context):
+        attrs = {}
+        for f in fields(self):
+            attrs[f.name] = context.compute(getattr(self, f.name))
+        return type(self)(**attrs)
+
+# TODO: subexpressions(self)
+
 @dataclass(eq=False)
 class Scalar(Expr):
     def __neg__(self):
@@ -58,7 +69,10 @@ class Symbol(Scalar):
         return f"Symbol()"
 
     def evaluate(self, context):
-        return context[self]
+        try:
+            return context[self]
+        except KeyError:
+            return self
 
 @dataclass(eq=False)
 class Constant(Scalar):
@@ -69,12 +83,24 @@ class Constant(Scalar):
     def evaluate(self, context):
         return self.value
 
+    def __float__(self):
+        return self.value
+
 @dataclass(eq=False)
 class Unary(Scalar):
     scalar : Scalar
     def evaluate(self, context):
         scalar = context.compute(self.scalar)
-        return self.op(scalar)
+        if isinstance(scalar, Dual):
+            result = self.op(scalar.scalar)
+            partials = {}
+            for sym, d in scalar.partials.items():
+                partials[sym] = self.dop(scalar.scalar, d, result)
+            return Dual(result, partials)
+        elif isinstance(scalar, Expr):
+            return type(self)(scalar)
+        else:
+            return self.op(scalar)
 
 @dataclass(eq=False)
 class Previous(Unary):
@@ -82,7 +108,14 @@ class Previous(Unary):
         return f"Previous({s(self.scalar)})"
 
     def evaluate(self, context):
-        return context.previous.compute(self.scalar)
+        if context.previous is not None:
+            scalar = context.previous.compute(self.scalar)
+            if isinstance(scalar, Expr):
+                return type(self)(scalar)
+            else:
+                return scalar
+        else:
+            return self
 
 @dataclass(eq=False)
 class Neg(Unary):
@@ -92,6 +125,9 @@ class Neg(Unary):
 
     def stringify(self, s):
         return f"-{s(self.scalar)}"
+
+    def dop(self, scalar, dscalar, result):
+        return -dscalar
 
 @dataclass(eq=False)
 class Inv(Unary):
@@ -105,6 +141,11 @@ class Inv(Unary):
         else:
             raise Unsatisfiable
 
+    def dop(self, scalar, dscalar, result):
+        if scalar < 1e-12:
+            raise Nondifferentiable
+        return -dscalar / sqr(scalar)
+
 @dataclass(eq=False)
 class Sqr(Unary):
     def stringify(self, s):
@@ -112,6 +153,17 @@ class Sqr(Unary):
 
     def op(self, scalar):
         return scalar*scalar
+
+    def dop(self, scalar, dscalar, result):
+        return 2 * scalar * dscalar
+
+def sqr(obj):
+    if isinstance(obj, Scalar):
+        return Sqr(obj)
+    elif isinstance(obj, Compound):
+        return obj.distribute(sqr)
+    else:
+        return float(obj)**2
 
 @dataclass(eq=False)
 class Sqrt(Unary):
@@ -121,6 +173,17 @@ class Sqrt(Unary):
     def op(self, scalar):
         return math.sqrt(scalar)
 
+    def dop(self, scalar, dscalar, result):
+        return (result * dscalar) / (2 * scalar)
+
+def sqrt(obj):
+    if isinstance(obj, Scalar):
+        return Sqrt(obj)
+    elif isinstance(obj, Compound):
+        return obj.distribute(sqrt)
+    else:
+        return math.sqrt(float(obj))
+
 @dataclass(eq=False)
 class Abs(Unary):
     def stringify(self, s):
@@ -128,6 +191,14 @@ class Abs(Unary):
 
     def op(self, scalar):
         return abs(scalar)
+
+    def dop(self, scalar, dscalar, result):
+        if isinstance(scalar, Expr):
+            raise NotImplemented
+        if scalar < 0.0:
+            return -dscalar
+        else:
+            return dscalar
 
 @dataclass(eq=False)
 class Acos(Unary):
@@ -137,6 +208,20 @@ class Acos(Unary):
     def op(self, scalar):
         return math.acos(scalar)
 
+    def dop(self, scalar, dscalar, result):
+        return -dscalar / sqrt(1 - sqr(scalar))
+
+@dataclass(eq=False)
+class Cos(Unary):
+    def stringify(self, s):
+        return f"Cos({s(self.scalar)})"
+
+    def op(self, scalar):
+        return math.cos(scalar)
+
+    def dop(self, scalar, dscalar, result):
+        return -math.sin(scalar) * dscalar
+
 @dataclass(eq=False)
 class Binary(Scalar):
     lhs : Scalar
@@ -144,7 +229,20 @@ class Binary(Scalar):
     def evaluate(self, context):
         lhs = context.compute(self.lhs)
         rhs = context.compute(self.rhs)
-        return self.op(lhs, rhs)
+        if isinstance(lhs, Dual) or isinstance(rhs, Dual):
+            lhs = lhs if isinstance(lhs, Dual) else Dual(lhs, {})
+            rhs = rhs if isinstance(rhs, Dual) else Dual(rhs, {})
+            result = self.op(lhs.scalar, rhs.scalar)
+            partials = {}
+            for sym in set(lhs.partials) | set(rhs.partials):
+                dlhs = lhs.partials.get(sym, 0.0)
+                drhs = rhs.partials.get(sym, 0.0)
+                partials[sym] = self.dop(lhs.scalar, rhs.scalar, dlhs, drhs, result)
+            return Dual(result, partials)
+        elif isinstance(lhs, Expr) or isinstance(rhs, Expr):
+            return type(self)(lhs, rhs)
+        else:
+            return self.op(lhs, rhs)
 
 @dataclass(eq=False)
 class Add(Binary):
@@ -158,6 +256,9 @@ class Add(Binary):
     def op(self, lhs, rhs):
         return lhs + rhs
 
+    def dop(self, lhs, rhs, dlhs, drhs, result):
+        return dlhs + drhs
+
 @dataclass(eq=False)
 class Mul(Binary):
     precedence = 20
@@ -170,10 +271,13 @@ class Mul(Binary):
     def op(self, lhs, rhs):
         return lhs * rhs
 
+    def dop(self, lhs, rhs, dlhs, drhs, result):
+        return dlhs*rhs + lhs*drhs
+
 def convert(obj):
     if isinstance(obj, Expr):
         return obj
-    if isinstance(obj, float):
+    else:
         return Constant(obj)
 
 def distribute(lhs, rhs, operand):
@@ -189,7 +293,9 @@ def distribute(lhs, rhs, operand):
         raise TypeError
 
 def default_repr(expr, precedence=0):
-    if precedence < expr.precedence:
+    if not isinstance(expr, Expr):
+        return str(expr)
+    elif precedence < expr.precedence:
         return str(expr)
     else:
         return "(" + str(expr) + ")"
@@ -199,9 +305,11 @@ def validate(obj):
         a = getattr(obj, f.name)
         if f.type == float:
             setattr(obj, f.name, float(a))
-        if f.type == Constant:
-            setattr(obj, f.name, Constant(a))
-        assert isinstance(getattr(obj, f.name), f.type)
+        elif f.type == Scalar:
+            setattr(obj, f.name, convert(a))
+        a = getattr(obj, f.name)
+        if isinstance(f.type, type):
+            assert isinstance(a, f.type), f".{f.name} = {a} ? {f.type.__name__}"
 
 @dataclass(eq=False)
 class NonZero(Expr):
@@ -211,7 +319,9 @@ class NonZero(Expr):
 
     def evaluate(self, context):
         scalar = context.compute(self.scalar)
-        if scalar >= 1e-12:
+        if isinstance(scalar, Expr):
+            return NonZero(scalar)
+        elif scalar >= 1e-12:
             return 0
         else:
             raise Unsatisfiable
@@ -232,6 +342,8 @@ class Eq(Relation):
     def evaluate(self, context):
         lhs = context.compute(self.lhs)
         rhs = context.compute(self.rhs)
+        if isinstance(lhs, Expr) or isinstance(rhs, Expr):
+            return Eq(lhs, rhs)
         return lhs - rhs
 
 @dataclass(eq=False)
@@ -244,11 +356,14 @@ class SoftEq(Relation):
     def evaluate(self, context):
         lhs = context.compute(self.lhs)
         rhs = context.compute(self.rhs)
+        if isinstance(lhs, Expr) or isinstance(rhs, Expr):
+            return SoftEq(lhs, rhs, self.weight)
         return lhs - rhs
 
 @dataclass(eq=False)
 class Entity(Expr):
     def __post_init__(self):
+        super().__post_init__()
         self.equations = list(self.constraints())
 
     def constraints(self):
@@ -271,8 +386,8 @@ class EvaluationContext:
 
 @dataclass(eq=False)
 class JustContext(EvaluationContext):
-    variables : Dict[Symbol, float]
-    memo      : Dict[Scalar, float]
+    variables : Dict[Symbol, float | Scalar]
+    memo      : Dict[Scalar, float | Scalar]
     def compute(self, scalar):
         if isinstance(scalar, Symbol):
             return self[scalar]
@@ -284,6 +399,10 @@ class JustContext(EvaluationContext):
 
     def __getitem__(self, variable):
         return self.variables[variable]
+
+    def abstract(self, value):
+        self.variables[sym := Symbol()] = value
+        return sym
 
 @dataclass(eq=False)
 class VectoredContext(EvaluationContext):
@@ -353,12 +472,14 @@ def print_system(system):
     i = 1
     names = {}
     def system_repr(expr, precedence=0):
-        if expr in names:
+        if not isinstance(expr, Expr):
+            return str(expr)
+        elif expr in names:
             return names[expr]
         elif precedence < expr.precedence:
             return expr.stringify(system_repr)
         else:
-            return "(" + str(expr) + ")"
+            return "(" + expr.stringify(system_repr) + ")"
     print("SYSTEM:")
     for expr in postorder:
         if isinstance(expr, Symbol):
@@ -374,3 +495,25 @@ def print_system(system):
 zero = Constant(0.0)
 one  = Constant(1.0)
 
+@dataclass(eq=False)
+class Dual(Scalar):
+    scalar   : float | Scalar
+    partials : Dict[Symbol, float | Scalar]
+
+# TODO: evaluate & subexpressions
+
+    def stringify(self, s):
+        components = []
+        if self.scalar != 0.0:
+            components.append(s(self.scalar))
+        for sym, val in self.partials.items():
+            if val == 0.0:
+                continue
+            if val == 1.0:
+                components.append(f"dual({s(sym)})")
+            else:
+                components.append(f"dual({s(sym)})*{s(val)}")
+        return " + ".join(components)
+
+def dual(symbol, value=0.0):
+    return Dual(value, {symbol: 1.0})

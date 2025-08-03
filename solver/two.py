@@ -35,7 +35,7 @@ def dot(a, b):
     return a.x*b.x + a.y*b.y
 
 def mag(v):
-    return Sqrt(sqr(v.x) + sqr(v.y))
+    return sqrt(v.x**2 + v.y**2)
 
 @dataclass(eq=False)
 class Point(Vector):
@@ -45,7 +45,7 @@ class Point(Vector):
 @dataclass(eq=False)
 class Normal(Vector):
     def constraints(self):
-        yield Eq(self @ self, one)
+        yield eq(self @ self, one)
 
     def stringify(self, s):
         return f"two.Normal({s(self.x)}, {s(self.y)})"
@@ -70,7 +70,7 @@ class Drag(Entity):
     b : Point
 
     def constraints(self):
-        yield Eq(mag(self.a - self.b), zero).soft(100)
+        yield eq(mag(self.a - self.b), zero).soft(100)
 
 @dataclass(eq=False)
 class Coincident(Entity):
@@ -81,7 +81,18 @@ class Coincident(Entity):
         vector = self.t.vector
         scalar = self.t.scalar
         yield NonZero(vector @ vector)
-        yield Eq(self.a @ vector, -scalar)
+        yield eq(self.a @ vector, -scalar)
+
+@dataclass(eq=False)
+class SoftCoincident(Entity):
+    a : Point
+    t : Line
+
+    def constraints(self):
+        vector = self.t.vector
+        scalar = self.t.scalar
+        yield NonZero(vector @ vector)
+        yield eq(self.a @ vector, -scalar).soft(100.0)
 
 @dataclass(eq=False)
 class Distance(Entity):
@@ -92,7 +103,7 @@ class Distance(Entity):
 
     def constraints(self):
         n = self.along / mag(self.along)
-        yield Eq(Abs(n @ self.a - n @ self.b), self.d)
+        yield eq(xabs(n @ self.a - n @ self.b), self.d)
 
 @dataclass(eq=False)
 class Phi(Entity):
@@ -103,9 +114,9 @@ class Phi(Entity):
     def constraints(self):
         mag_n = mag(self.n)
         mag_m = mag(self.m)
-        yield Eq(Acos(dot(self.n / mag_n, self.m / mag_m)), self.a)
-        yield Eq(mag_n, Previous(mag_n)).soft(0.1)
-        yield Eq(mag_m, Previous(mag_m)).soft(0.1)
+        yield eq(acos(dot(self.n / mag_n, self.m / mag_m)), self.a)
+        yield eq(mag_n, Previous(mag_n)).soft(0.1)
+        yield eq(mag_m, Previous(mag_m)).soft(0.1)
 
 def angle_of(n, m):
     magn = np.linalg.norm(n)

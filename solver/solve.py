@@ -1,64 +1,82 @@
-from .expressions import NonZero, Eq, SoftEq, print_system, all_variables, JustContext, VectoredContext, dual
+from .expressions import NonZero, Eq, SoftEq, print_system, all_variables, JustContext, VectoredContext, EmptyContext, dual, cells
 import numpy as np
 import random
 import math
 
-def setup(entities, context):
-    hard = []
-    soft = []
+def setup(entities, context, known, knownvec):
+    hard = set()
+    soft = set()
     for entity in entities:
         for obj in entity.equations:
             if isinstance(obj, (NonZero, Eq)):
-                hard.append(obj)
+                hard.add(obj)
             elif isinstance(obj, SoftEq):
-                soft.append(obj)
-    if False:
-        print_system(hard + soft)
-    each, x0 = make_vectored_context(hard + soft, context)
+                soft.add(obj)
+    if True:
+        print_system(hard | soft)
+    cx = EmptyContext(context, {})
+    hard = set(obj.evaluate(cx) for obj in hard)
+    soft = set(obj.evaluate(cx) for obj in soft)
+
+    each, x0 = make_vectored_context(hard | soft, context)
     wrap = lambda x: VectoredContext(x0, x0.variables, {}, x)
+
+    LH = len(hard)
+    hard = cells(hard, x0.variables, known)
+    LS = len(soft)
+    g_w  = np.array([a.weight for a in soft], float)
+    soft = cells(soft, x0.variables, known)
+
     def f(x):
-        x = wrap(x)
-        return np.array([a.evaluate(x) for a in hard], float)
-    def f_jac(x):
-        m = len(hard)
-        n = len(x)
-        x = wrap(x)
-        variables = {}
-        for sym in x.variables:
-            variables[sym] = dual(sym, x[sym])
-        y = JustContext(None, variables, {})
-        out = np.zeros((m,n), float)
-        for i, a in enumerate(hard):
-            if isinstance(a, Eq):
-                f = (a.lhs - a.rhs).evaluate(y)
-                if isinstance(f, float):
-                    continue
-                for sym, d in f.partials.items():
-                    out[i, x.variables[sym]] += d
-        return out
+        s = np.zeros(len(hard), float)
+        xs = x, x0.x, s, knownvec
+        for i, cell in enumerate(hard):
+            s[i] = cell(xs)
+        return s[-LH:]
+    #def f_jac(x):
+    #    m = len(hard)
+    #    n = len(x)
+    #    x = wrap(x)
+    #    variables = {}
+    #    for sym in x.variables:
+    #        variables[sym] = dual(sym, x[sym])
+    #    y = JustContext(None, variables, {})
+    #    out = np.zeros((m,n), float)
+    #    for i, a in enumerate(hard):
+    #        if isinstance(a, Eq):
+    #            f = (a.lhs - a.rhs).evaluate(y)
+    #            if isinstance(f, float):
+    #                continue
+    #            for sym, d in f.partials.items():
+    #                out[i, x.variables[sym]] += d
+    #    return out
     def g(x):
-        x = wrap(x)
-        return np.array([a.evaluate(x) for a in soft], float)
-    def g_jac(x):
-        m = len(soft)
-        n = len(x)
-        x = wrap(x)
-        variables = {}
-        for sym in x.variables:
-            variables[sym] = dual(sym, x[sym])
-        y = JustContext(x0, variables, {})
-        out = np.zeros((m,n), float)
-        for i, a in enumerate(soft):
-            if isinstance(a, SoftEq):
-                f = (a.lhs - a.rhs).evaluate(y)
-                if isinstance(f, float):
-                    continue
-                for sym, d in f.partials.items():
-                    out[i, x.variables[sym]] += d
-        return out
+        s = np.zeros(len(soft), float)
+        xs = x, x0.x, s, knownvec
+        for i, cell in enumerate(soft):
+            s[i] = cell(xs)
+        return s[-LS:]
+    #    x = wrap(x)
+    #    return np.array([a.evaluate(x) for a in soft], float)
+    #def g_jac(x):
+    #    m = len(soft)
+    #    n = len(x)
+    #    x = wrap(x)
+    #    variables = {}
+    #    for sym in x.variables:
+    #        variables[sym] = dual(sym, x[sym])
+    #    y = JustContext(x0, variables, {})
+    #    out = np.zeros((m,n), float)
+    #    for i, a in enumerate(soft):
+    #        if isinstance(a, SoftEq):
+    #            f = (a.lhs - a.rhs).evaluate(y)
+    #            if isinstance(f, float):
+    #                continue
+    #            for sym, d in f.partials.items():
+    #                out[i, x.variables[sym]] += d
+    #    return out
     f_jac = approximate_jacobian(f)
     g_jac = approximate_jacobian(g)
-    g_w = np.array([a.weight for a in soft], float)
     return f, f_jac, g, g_jac, g_w, x0.x.copy(), wrap
 
 def make_vectored_context(system, context):
@@ -158,7 +176,7 @@ def solve_soft(f, f_jac, g, g_jac, g_w, x, tol=1e-6, max_iterations=100, nudge=1
         return np.linalg.pinv(Aw) @ Bw
     fi = f(x)
     g_norm = g_norm_prev = np.linalg.norm(gi := g(x), ord=np.inf)
-    for k in range(max_iterations):
+    for k in range(10):
         if g_norm < tol:
             return enforce(f, f_jac, x, tol, max_iterations, nudge)
         J_h = f_jac(x)

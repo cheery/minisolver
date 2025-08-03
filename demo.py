@@ -6,18 +6,26 @@ import numpy as np
 import math
 import weakref
 
+last_call = None
+
 def solve_constraints(dragging=None):
-    entities = list(all_entities(sketch))
-    mx, my = pygame.mouse.get_pos()
-    if isinstance(dragging, two.Point):
-        p = two.Point(mx, my)
-        entities.append(two.Drag(dragging, p))
-    elif isinstance(dragging, two.Line):
-        p = two.Point(mx, my)
-        q = two.Point(Symbol(), Symbol())
-        entities.append(two.Drag(p, q))
-        entities.append(two.Coincident(q, dragging))
-    f, jac, g, soft_jac, g_w, x0, wrap = setup(entities, context)
+    global last_call
+    if not (last_call and last_call[2] == dragging):
+        entities = list(all_entities(sketch))
+        knownvec = np.zeros(2)
+        mx = Symbol()
+        my = Symbol()
+        known = {mx: 0, my: 1}
+        if isinstance(dragging, two.Point):
+            p = two.Point(mx, my)
+            entities.append(two.Drag(dragging, p))
+        elif isinstance(dragging, two.Line):
+            p = two.Point(mx, my)
+            entities.append(two.SoftCoincident(p, dragging))
+        last_call = setup(entities, context, known, knownvec), knownvec, dragging
+
+    last_call[1][:] = pygame.mouse.get_pos()
+    f, jac, g, soft_jac, g_w, x0, wrap = last_call[0]
     try:
         sol = solve_soft(f, jac, g, soft_jac, g_w, x0)
         ctx = wrap(sol)
@@ -51,6 +59,9 @@ def erase_derived(entity):
 def line_rect_intersection(orient, distance, rect):
     A, B = orient
     C = distance
+    A = float(A)
+    B = float(B)
+    C = float(C)
     xmin, ymin = rect.topleft
     xmax, ymax = rect.bottomright
     pts = []
@@ -111,13 +122,13 @@ while running:
                 m = np.array(ev.pos)
                 def dfn(p):
                     if isinstance(p, two.Line):
-                        x = context.compute(p.vector.x)
-                        y = context.compute(p.vector.y)
-                        d = context.compute(p.scalar)
-                        return two.point_line_distance(m, np.array((x,y)), d) * 2.0
+                        x = float(context.compute(p.vector.x))
+                        y = float(context.compute(p.vector.y))
+                        d = float(context.compute(p.scalar))
+                        return float(two.point_line_distance(m, np.array((x,y)), d) * 2.0)
                     elif isinstance(p, two.Point):
-                        x = context.compute(p.x)
-                        y = context.compute(p.y)
+                        x = float(context.compute(p.x))
+                        y = float(context.compute(p.y))
                         return np.linalg.norm((x,y) - m) * 1.0
                     return np.inf
                 highlight = min(sketch, key=dfn)
@@ -146,6 +157,7 @@ while running:
                 sketch.append(two.Phi(math.pi * 0.25, n, m))
                 highlight = alight = blight = None
         elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_SPACE:
+            last_call = None
             green = solve_constraints(highlight)
 
     screen.fill((30, 30, 30))
@@ -158,8 +170,8 @@ while running:
         if blight is entity:
             color = (255, 0, 255)
         if isinstance(entity, two.Point):
-            x = context.compute(entity.x)
-            y = context.compute(entity.y)
+            x = float(context.compute(entity.x))
+            y = float(context.compute(entity.y))
             pygame.draw.circle(screen, color, (x,y), 2)
         if isinstance(entity, two.Line):
             line = context.compute(entity)

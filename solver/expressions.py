@@ -1,13 +1,11 @@
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, fields
 from typing import List, Dict, Optional, Callable, Tuple, Any, Set, Union
+from fractions import Fraction
+import numpy as np
 import math
 
-class Unsatisfiable(Exception):
-    pass
-
-class Nondifferentiable(Exception):
-    pass
+# TODO: make partial differentiator that is invoked from above
 
 @dataclass(eq=False)
 class Expr:
@@ -28,11 +26,11 @@ class Expr:
 
     def __sub__(self, other):
         other = convert(other)
-        return distribute(self, other, lambda lhs, rhs: add(lhs, neg(rhs)))
+        return distribute(self, other, lambda lhs, rhs: add(lhs, -rhs))
 
     def __rsub__(self, other):
         other = convert(other)
-        return distribute(other, self, lambda lhs, rhs: add(lhs, neg(rhs)))
+        return distribute(other, self, lambda lhs, rhs: add(lhs, -rhs))
 
     def __mul__(self, other):
         other = convert(other)
@@ -44,17 +42,28 @@ class Expr:
 
     def __truediv__(self, other):
         other = convert(other)
-        return distribute(self, other, lambda lhs, rhs: mul(lhs, inv(rhs)))
+        return distribute(self, other, lambda lhs, rhs: mul(lhs, rhs**-1))
 
     def __rtruediv__(self, other):
         other = convert(other)
-        return distribute(other, self, lambda lhs, rhs: mul(lhs, inv(rhs)))
+        return distribute(other, self, lambda lhs, rhs: mul(lhs, rhs**-1))
 
-    def evaluate(self, context):
+    def __pow__(self, other):
+        other = convert(other)
+        return distribute(self, other, power)
+
+    def __rpow__(self, other):
+        other = convert(other)
+        return distribute(other, self, power)
+
+    def apply(self, fn):
         attrs = {}
         for f in fields(self):
-            attrs[f.name] = context.compute(getattr(self, f.name))
+            attrs[f.name] = fn(getattr(self, f.name))
         return type(self)(**attrs)
+
+    def evaluate(self, context):
+        return self.apply(context.compute)
 
     def subexpressions(self):
         for f in fields(self):
@@ -67,179 +76,188 @@ class Scalar(Expr):
     def __neg__(self):
         return neg(self)
 
-@dataclass(eq=False)
-class Symbol(Scalar):
-    def stringify(self, s):
-        return f"Symbol()"
+    def __hash__(self):
+        return hash((type(self),) + tuple(self.subexpressions()))
 
-    def evaluate(self, context):
-        try:
-            return context[self]
-        except KeyError:
-            return self
+    def __eq__(self, other):
+        if isinstance(other, Scalar) and self.kind == other.kind:
+            return self._eq(other)
+        return False
+
+    def __lt__(self, other):
+        if isinstance(other, Scalar):
+            if self.kind < other.kind:
+                return True
+            if self.kind > other.kind:
+                return False
+            return self._lt(other)
+        else:
+            return super().__lt__(other)
 
 @dataclass(eq=False)
-class Constant(Scalar):
+class Floating(Scalar):
     value : float
+    kind = 0
     def stringify(self, s):
         return str(self.value)
 
+    def diff(self, context):
+        return Dual(self.value, {})
+
     def evaluate(self, context):
-        return self.value
+        return self
 
     def __float__(self):
         return self.value
 
-@dataclass(eq=False)
-class Unary(Scalar):
-    scalar : Scalar
-    def evaluate(self, context):
-        scalar = context.compute(self.scalar)
-        if isinstance(scalar, Dual):
-            result = self.op(scalar.scalar)
-            partials = {}
-            for sym, d in scalar.partials.items():
-                partials[sym] = self.dop(scalar.scalar, d, result)
-            return Dual(result, partials)
-        elif isinstance(scalar, Expr):
-            return type(self)(scalar)
-        else:
-            return self.op(scalar)
+    def __hash__(self):
+        return hash(float(self))
+
+    def _eq(self, other):
+        return float(self) == float(other)
+
+    def _lt(self, other):
+        return float(self) < float(other)
 
 @dataclass(eq=False)
-class Previous(Unary):
+class Rational(Scalar):
+    value : Fraction
+    kind = 0
     def stringify(self, s):
-        return f"Previous({s(self.scalar)})"
+        return str(self.value)
+
+    def diff(self, context):
+        return Dual(self.value, {})
 
     def evaluate(self, context):
-        if context.previous is not None:
-            scalar = context.previous.compute(self.scalar)
-            if isinstance(scalar, Expr):
-                return type(self)(scalar)
-            else:
-                return scalar
-        else:
-            return self
+        return self
+
+    def __float__(self):
+        return float(self.value)
+
+    def __hash__(self):
+        return hash(float(self))
+
+    def _eq(self, other):
+        return float(self) == float(other)
+
+    def _lt(self, other):
+        return float(self) < float(other)
 
 @dataclass(eq=False)
-class PowN(Unary):
-    power : float
+class Product(Scalar):
+    factors : List[Scalar]
+    kind = 1
     precedence = 20
-    def stringify(self, s):
-        if self.power < 0:
-            return f"1 / {s(PowN(self.scalar, -self.power), 19)}"
-        elif self.power == 1:
-            return f"{s(self.scalar, 20)}"
+
+    def diff(self, context):
+        factors = [context.compute(factor) for factor in self.factors]
+        assert False
+
+    def evaluate(self, context):
+        factors = [context.compute(factor) for factor in self.factors]
+        if any(isinstance(factor, Dual) for factor in factors):
+            result = one
+            factors = []
+            pfactors = defaultdict(list)
+            for i, factor in enumerate(factors):
+                if isinstance(factor, Dual):
+                    result *= factor.scalar
+                    factors.append(factor.scalar)
+                    for sym, value in factor.partials.items():
+                        pfactors[sym].append((i, value))
+                else:
+                    result *= factor
+                    factors.append(factor)
+            partials = {}
+            for sym, xs in pfactors.items():
+                partials[sym] = product_derivative(factors, xs)
+            return Dual(result, partials)
         else:
-            return f"{s(self.scalar, 20)}**{self.power}"
+            result = one
+            for factor in factors:
+                result *= factor
+            return result
 
-    def op(self, scalar):
-        if self.power < 0 and scalar < 1e-12:
-            raise Unsatisfiable
-        return scalar ** self.power
+    def apply(self, fn):
+        return Product([fn(x) for x in self.factors])
 
-    def dop(self, scalar, dscalar, result):
-        if self.power <= 0 and scalar < 1e-12:
-            raise Nondifferentiable
-        return dscalar * self.power * (scalar ** (self.power-1))
+    def subexpressions(self):
+        yield from self.factors
 
-def inv(obj):
-    if isinstance(obj, Expr):
-        return PowN(obj, -1)
-    elif float(obj) < 1e-12:
-        return PowN(Product(0, []), -1)
-    else:
-        return 1.0 / float(obj)
-
-def sqr(obj):
-    if isinstance(obj, Expr):
-        return PowN(obj, 2)
-    else:
-        return float(obj)**2
-
-@dataclass(eq=False)
-class Sqrt(Unary):
     def stringify(self, s):
-        return f"Sqrt({s(self.scalar)})"
+        return self.stringify_factors(s)
 
-    def op(self, scalar):
-        return math.sqrt(scalar)
+    def stringify_factors(self, s):
+        out = []
+        for factor in self.factors:
+            out.append(s(factor, 20))
+        if not out:
+            out.append("1")
+        return "*".join(out)
 
-    def dop(self, scalar, dscalar, result):
-        return (result * dscalar) / (2 * scalar)
+    def _eq(self, other):
+        return self.factors == other.factors
 
-def sqrt(obj):
-    if isinstance(obj, Scalar):
-        return Sqrt(obj)
-    elif isinstance(obj, Compound):
-        return obj.distribute(sqrt)
-    else:
-        return math.sqrt(float(obj))
+    def _lt(self, other):
+        m = len(self.factors)
+        n = len(other.factors)
+        for i in range(1, min(m, n)+1):
+            if self.factors[m-i] < other.factors[n-i]:
+                return True
+            if self.factors[m-i] > other.factors[n-i]:
+                return False
+        return m < n
 
-@dataclass(eq=False)
-class Abs(Unary):
-    def stringify(self, s):
-        return f"Abs({s(self.scalar)})"
-
-    def op(self, scalar):
-        return abs(scalar)
-
-    def dop(self, scalar, dscalar, result):
-        if isinstance(scalar, Expr):
-            raise NotImplemented
-        if scalar < 0.0:
-            return -dscalar
-        else:
-            return dscalar
-
-@dataclass(eq=False)
-class Acos(Unary):
-    def stringify(self, s):
-        return f"Acos({s(self.scalar)})"
-
-    def op(self, scalar):
-        return math.acos(scalar)
-
-    def dop(self, scalar, dscalar, result):
-        return -dscalar / sqrt(1 - sqr(scalar))
+def product_derivative(xs, p):
+    total = 0.0
+    for i,x in p:
+        for j in range(len(xs)):
+            if i != j:
+                x *= xs[j]
+        total += x
+    return total
 
 @dataclass(eq=False)
-class Cos(Unary):
-    def stringify(self, s):
-        return f"Cos({s(self.scalar)})"
-
-    def op(self, scalar):
-        return math.cos(scalar)
-
-    def dop(self, scalar, dscalar, result):
-        return -math.sin(scalar) * dscalar
-
-@dataclass(eq=False)
-class Binary(Scalar):
+class Power(Scalar):
     lhs : Scalar
     rhs : Scalar
+    kind = 2
+    precedence = 30
+    def stringify(self, s):
+        return f"{s(self.lhs, 30)}**{s(self.rhs, 30)}"
+
+    def diff(self, context):
+        lhs = context.compute(self.lhs)
+        rhs = context.compute(self.rhs)
+        assert False
+
     def evaluate(self, context):
         lhs = context.compute(self.lhs)
         rhs = context.compute(self.rhs)
-        if isinstance(lhs, Dual) or isinstance(rhs, Dual):
-            lhs = lhs if isinstance(lhs, Dual) else Dual(lhs, {})
-            rhs = rhs if isinstance(rhs, Dual) else Dual(rhs, {})
-            result = self.op(lhs.scalar, rhs.scalar)
-            partials = {}
-            for sym in set(lhs.partials) | set(rhs.partials):
-                dlhs = lhs.partials.get(sym, 0.0)
-                drhs = rhs.partials.get(sym, 0.0)
-                partials[sym] = self.dop(lhs.scalar, rhs.scalar, dlhs, drhs, result)
-            return Dual(result, partials)
-        elif isinstance(lhs, Expr) or isinstance(rhs, Expr):
-            return type(self)(lhs, rhs)
+        assert not isinstance(lhs, Dual) or isinstance(rhs, Dual), "TODO"
+        return lhs ** rhs
+
+    def _eq(self, other):
+        return self.lhs == other.lhs and self.rhs == other.rhs
+
+    def _lt(self, other):
+        if self.lhs < other.lhs:
+            return True
+        elif self.lhs == other.lhs and self.rhs < other.rhs:
+            return True
         else:
-            return self.op(lhs, rhs)
+            return False
 
 @dataclass(eq=False)
 class Sum(Scalar):
     terms : List[Scalar]
+    kind = 3
     precedence = 10
+
+    def diff(self, context):
+        terms = [context.compute(term) for term in self.terms]
+        assert False
 
     def evaluate(self, context):
         terms = [context.compute(term) for term in self.terms]
@@ -257,132 +275,455 @@ class Sum(Scalar):
         else:
             return sum(terms)
 
+    def apply(self, fn):
+        return Sum([fn(x) for x in self.terms])
+
     def subexpressions(self):
         yield from self.terms
 
     def stringify(self, s):
         out = []
         for term in self.terms:
-            if isinstance(term, Product) and term.constant < 0.0:
-                if out:
-                    out.append(" - ")
-                else:
-                    out.append("-")
-                out.append(term.stringify_factors(s))
-            else:
-                if out:
-                    out.append(" + ")
-                out.append(s(term, 10))
-        return "".join(out)
+            out.append(s(term, 10))
+        return " + ".join(out)
 
+    def _eq(self, other):
+        return self.terms == other.terms
+
+    def _lt(self, other):
+        m = len(self.terms)
+        n = len(other.terms)
+        for i in range(1, min(m, n)+1):
+            if self.terms[m-i] < other.terms[n-i]:
+                return True
+            if self.terms[m-i] > other.terms[n-i]:
+                return False
+        return m < n
+ 
 @dataclass(eq=False)
-class Product(Scalar):
-    constant : float
-    factors  : List[Scalar]
-    precedence = 20
-    def __float__(self):
-        if self.factors:
-            raise TypeError
-        return self.constant
-
+class Function(Scalar):
+    kind = 4
     def evaluate(self, context):
-        factors = [context.compute(factor) for factor in self.factors]
-        if any(isinstance(factor, Dual) for factor in factors):
-            result = self.constant
-            factors = []
-            pfactors = defaultdict(list)
-            for i, factor in enumerate(factors):
-                if isinstance(factor, Dual):
-                    result *= factor.scalar
-                    factors.append(factor.scalar)
-                    for sym, value in factor.partials.items():
-                        pfactors[sym].append((i, value))
-                else:
-                    result *= factor
-                    factors.append(factor)
-            partials = {}
-            for sym, xs in pfactors.items():
-                partials[sym] = product_derivative(factors, xs)
-            return Dual(result, partials)
-        else:
-            result = self.constant
-            for factor in factors:
-                result *= factor
-            return result
-
-    def subexpressions(self):
-        yield from self.factors
+        return self.op(*[context.compute(x) for x in self.subexpressions()])
 
     def stringify(self, s):
-        prefix = "-" if self.constant < 0.0 else ""
-        return prefix + self.stringify_factors(s)
+        args = [s(expr) for expr in self.subexpressions()]
+        return self.name + "(" + "".join(args) + ")"
 
-    def stringify_factors(self, s):
-        out = []
-        if abs(self.constant) != 1:
-            out.append(str(abs(self.constant)))
-        for factor in self.factors:
-            out.append(s(factor, 20))
-        if not out:
-            out.append("1.0")
-        return "*".join(out)
+    def _eq(self, other):
+        return type(self) == type(other) and tuple(self.subexpressions()) == tuple(other.subexpressions())
 
-def product_derivative(xs, p):
-    total = 0.0
-    for i,x in p:
-        for j in range(len(xs)):
-            if i != j:
-                x *= xs[j]
-        total += x
-    return total
+    def _lt(self, other):
+        if self.name < other.name:
+            return True
+        if id(type(self)) < id(type(other)):
+            return True
+        return type(self) == type(other) and tuple(self.subexpressions()) < tuple(other.subexpressions())
+
+@dataclass(eq=False)
+class Symbol(Scalar):
+    kind = 5
+    def stringify(self, s):
+        return f"Symbol()"
+
+    def diff(self, context):
+        return dual(self, self)
+
+    def evaluate(self, context):
+        try:
+            return context[self]
+        except KeyError:
+            return self
+
+    def _eq(self, other):
+        return id(self) == id(other)
+
+    def _lt(self, other):
+        return id(self) < id(other)
+
+def base(u):
+    if isinstance(u, Power):
+        return u.lhs
+    else:
+        return u
+
+def exponent(u):
+    if isinstance(u, Power):
+        return u.rhs
+    else:
+        return one
+
+def term(u):
+    if isinstance(u, (Symbol, Sum, Power, Function)):
+        return u
+    elif isinstance(u, Product):
+        if isinstance(u.factors[0], (Rational,Floating)):
+            if len(u.factors) == 2:
+                return u.factors[1]
+            else:
+                return Product(u.factors[1:])
+        else:
+            return u
+    else:
+        return undef
+
+def const(u):
+    if isinstance(u, (Symbol, Sum, Power, Function)):
+        return one
+    elif isinstance(u, Product):
+        if isinstance(u.factors[0], (Rational,Floating)):
+            return u.factors[0]
+        else:
+            return one
+    else:
+        return undef
+
+def power(v, w):
+    if v == undef or w == undef:
+        return undef
+    elif v == zero:
+        if isinstance(w, (Rational,Floating)) and float(w) > 0:
+            return zero
+        else:
+            return undef # TODO: This is probably not correct.
+    elif v == one:
+        return one
+    elif isinstance(w, Rational) and w.value.denominator == 1:
+        return power_integer(v, w)
+    else:
+        return Power(v, w)
+
+def power_integer(v, n):
+    if isinstance(v, Rational):
+        return Rational(v.value ** n.value)
+    elif isinstance(v, Floating):
+        return Floating(v.value ** n.value)
+    elif n.value == 0:
+        return one
+    elif n.value == 1:
+        return v
+    elif isinstance(v, Power):
+        r = v.lhs
+        s = v.rhs
+        p = product([s, n])
+        if isinstance(p, Rational):
+            return power_integer(r,p)
+        else:
+            return Power(r, p)
+    elif isinstance(v, Product):
+        r = v.apply(lambda x: power(x, n))
+        return product(r.factors)
+    else:
+        return Power(v, n)
+
+def product(factors):
+    factors.sort()
+    if undef in factors:
+        return undef
+    if zero in factors:
+        return zero
+    if len(factors) == 1:
+        return factors[0]
+    v = product_fold(factors)
+    if len(v) == 0:
+        return one
+    elif len(v) == 1:
+        return v[0]
+    else:
+        return Product(v)
+
+def product_fold(factors):
+    changed = True
+    while changed:
+        factors.sort()
+        changed = False
+        i = 0
+        while i+1 < len(factors):
+            result = product_merge(factors[i], factors[i+1])
+            if result is None:
+                i += 1
+            else:
+                changed = True
+                factors[i:i+2] = result
+    return factors
+
+def product_merge(u1, u2):
+    if isinstance(u1, Product) and isinstance(u2, Product):
+        return u1.factors + u2.factors
+    elif isinstance(u1, Product):
+        return u1.factors + [u2]
+    elif isinstance(u2, Product):
+        return [u1] + u2.factors
+    elif isinstance(u1, Rational) and isinstance(u2, Rational):
+        rat = Rational(u1.value * u2.value)
+        if rat == one:
+            return []
+        else:
+            return [rat]
+    elif isinstance(u1, (Rational, Floating)) and isinstance(u2, (Rational,Floating)):
+        flo = Floating(u1.value * u2.value)
+        if flo == one:
+            return []
+        else:
+            return [flo]
+    elif u1 == one:
+        return [u2]
+    elif u2 == one:
+        return [u1]
+    elif base(u1) == base(u2):
+        s = sum([exponent(u1), exponent(u2)])
+        p = power(base(u1), s)
+        if p == one:
+            return []
+        else:
+            return [p]
+    else:
+        return None
+
+def summation(terms):
+    terms.sort()
+    if undef in terms:
+        return undef
+    if len(terms) == 1:
+        return terms[0]
+    v = summation_fold(terms)
+    if len(v) == 0:
+        return zero
+    elif len(v) == 1:
+        return v[0]
+    else:
+        return Sum(v)
+
+def summation_fold(terms):
+    changed = True
+    while changed:
+        terms.sort()
+        changed = False
+        i = 0
+        while i+1 < len(terms):
+            result = summation_merge(terms[i], terms[i+1])
+            if result is None:
+                i += 1
+            else:
+                changed = True
+                terms[i:i+2] = result
+    return terms
+
+def summation_merge(u1, u2):
+    if isinstance(u1, Sum) and isinstance(u2, Sum):
+        return u1.terms + u2.terms
+    elif isinstance(u1, Sum):
+        return u1.terms + [u2]
+    elif isinstance(u2, Sum):
+        return [u1] + u2.terms
+    elif isinstance(u1, Rational) and isinstance(u2, Rational):
+        rat = Rational(u1.value + u2.value)
+        if rat == zero:
+            return []
+        else:
+            return [rat]
+    elif isinstance(u1, (Rational, Floating)) and isinstance(u2, (Rational,Floating)):
+        flo = Floating(u1.value + u2.value)
+        if flo == zero:
+            return []
+        else:
+            return [flo]
+    elif u1 == zero:
+        return [u2]
+    elif u2 == zero:
+        return [u1]
+    elif term(u1) == term(u2):
+        s = summation([const(u1), const(u2)])
+        p = product([s, term(u1)])
+        if p == zero:
+            return []
+        else:
+            return [p]
+    else:
+        return None
+
+@dataclass(eq=False)
+class Previous(Function):
+    name = "Previous"
+    scalar : Scalar
+
+    def diff(self, context):
+        raise RuntimeError
+
+    def evaluate(self, context):
+        if context.previous is not None:
+            expr = context.previous.compute(self.scalar)
+            if isinstance(expr, (Floating, Rational)):
+                return expr
+            else:
+                return Previous(expr)
+        else:
+            return self
+
+#    def evaluate(self, context):
+#        scalar = context.compute(self.scalar)
+#        if isinstance(scalar, Dual):
+#            result = self.op(scalar.scalar)
+#            partials = {}
+#            for sym, d in scalar.partials.items():
+#                partials[sym] = self.dop(scalar.scalar, d, result)
+#            return Dual(result, partials)
+#        elif isinstance(scalar, Expr):
+#            return type(self)(scalar)
+#        else:
+#            return self.op(scalar)
+#@dataclass(eq=False)
+#class Previous(Unary):
+#    def stringify(self, s):
+#        return f"Previous({s(self.scalar)})"
+#
+#    def evaluate(self, context):
+#        if context.previous is not None:
+#            scalar = context.previous.compute(self.scalar)
+#            if isinstance(scalar, Expr):
+#                return type(self)(scalar)
+#            else:
+#                return scalar
+#        else:
+#            return self
+#
+#@dataclass(eq=False)
+#class PowN(Unary):
+#    power : float
+#    precedence = 20
+#    def stringify(self, s):
+#        if self.power < 0:
+#            return f"1 / {s(PowN(self.scalar, -self.power), 19)}"
+#        elif self.power == 1:
+#            return f"{s(self.scalar, 20)}"
+#        else:
+#            return f"{s(self.scalar, 20)}**{self.power}"
+#
+#    def op(self, scalar):
+#        if self.power < 0 and scalar < 1e-12:
+#            raise Unsatisfiable
+#        return scalar ** self.power
+#
+#    def dop(self, scalar, dscalar, result):
+#        if self.power <= 0 and scalar < 1e-12:
+#            raise Nondifferentiable
+#        return dscalar * self.power * (scalar ** (self.power-1))
+#
+#def inv(obj):
+#    if isinstance(obj, Expr):
+#        return PowN(obj, -1)
+#    elif float(obj) < 1e-12:
+#        return PowN(Product(0, []), -1)
+#    else:
+#        return 1.0 / float(obj)
+#
+#def sqr(obj):
+#    if isinstance(obj, Expr):
+#        return PowN(obj, 2)
+#    else:
+#        return float(obj)**2
+
+def sqrt(obj):
+    if isinstance(obj, Compound):
+        return obj.distribute(sqrt)
+    else:
+        return Sqrt.op(convert(obj))
+
+@dataclass(eq=False)
+class Sqrt(Function):
+    name = "sqrt"
+    scalar : Scalar
+
+    def diff(self, context):
+        assert False
+
+    @classmethod
+    def op(cls, scalar):
+        assert not isinstance(scalar, Dual)
+        if isinstance(scalar, (Floating, Rational)):
+            return Floating(math.sqrt(scalar.value))
+        else:
+            return cls(scalar)
+
+#    def dop(self, scalar, dscalar, result):
+#        return (result * dscalar) / (2 * scalar)
+
+def xabs(obj):
+    if isinstance(obj, Compound):
+        return obj.distribute(abs)
+    else:
+        return Abs.op(convert(obj))
+
+@dataclass(eq=False)
+class Abs(Function):
+    name = "abs"
+    scalar : Scalar
+
+    def diff(self, context):
+        assert False
+
+    @classmethod
+    def op(cls, scalar):
+        assert not isinstance(scalar, Dual)
+        if isinstance(scalar, (Floating, Rational)):
+            return Floating(abs(scalar.value))
+        else:
+            return cls(scalar)
+
+#    def dop(self, scalar, dscalar, result):
+#        if isinstance(scalar, Expr):
+#            raise NotImplemented
+#        if scalar < 0.0:
+#            return -dscalar
+#        else:
+#            return dscalar
+
+def acos(obj):
+    if isinstance(obj, Compound):
+        return obj.distribute(abs)
+    else:
+        return Acos.op(convert(obj))
+
+@dataclass(eq=False)
+class Acos(Function):
+    name = "acos"
+    scalar : Scalar
+
+    def diff(self, context):
+        assert False
+
+    @classmethod
+    def op(cls, scalar):
+        assert not isinstance(scalar, Dual)
+        if isinstance(scalar, (Floating, Rational)):
+            return Floating(math.acos(scalar.value))
+        else:
+            return cls(scalar)
+
+#    def dop(self, scalar, dscalar, result):
+#        return -dscalar / sqrt(1 - sqr(scalar))
+#
 
 def add(lhs, rhs):
-    terms = []
-    if isinstance(lhs, Sum):
-        terms.extend(lhs.terms)
-    else:
-        terms.append(lhs)
-    if isinstance(rhs, Sum):
-        terms.extend(rhs.terms)
-    else:
-        terms.append(rhs)
-    constant = 0
-    for term in terms[:]:
-        if isinstance(term, Product) and not term.factors:
-            constant += term.constant
-            terms.remove(term)
-    if constant != 0.0:
-        terms.append(Product(constant, []))
-    return Sum(terms)
+    return summation([lhs, rhs])
 
 def neg(term):
-    if isinstance(term, Sum):
-        return Sum(neg(t) for t in term.terms)
-    elif isinstance(term, Product):
-        return Product(-term.constant, term.factors)
-    else:
-        return Product(-1, [term])
+    return product([Rational(Fraction(-1)), term])
 
 def mul(lhs, rhs):
-    constant = 1.0
-    factors  = []
-    if isinstance(lhs, Product):
-        constant *= lhs.constant
-        factors.extend(lhs.factors)
-    else:
-        factors.append(lhs)
-    if isinstance(rhs, Product):
-        constant *= rhs.constant
-        factors.extend(rhs.factors)
-    else:
-        factors.append(rhs)
-    return Product(constant, factors)
+    return product([lhs, rhs])
 
 def convert(obj):
     if isinstance(obj, Expr):
         return obj
+    elif isinstance(obj, int):
+        return Rational(Fraction(obj))
+    elif isinstance(obj, Fraction):
+        return Rational(obj)
+    elif isinstance(obj, float):
+        return Floating(obj)
     else:
-        return Product(float(obj), [])
+        return Floating(float(obj))
 
 def distribute(lhs, rhs, operand):
     if isinstance(lhs, Scalar) and isinstance(rhs, Scalar):
@@ -415,54 +756,51 @@ def validate(obj):
         if isinstance(f.type, type):
             assert isinstance(a, f.type), f".{f.name} = {a} ? {f.type.__name__}"
 
-@dataclass(eq=False)
+@dataclass(eq=True)
 class NonZero(Expr):
     scalar : Scalar
     def stringify(self, s):
         return f"NonZero({s(self.scalar)})"
 
     def evaluate(self, context):
-        scalar = context.compute(self.scalar)
-        if isinstance(scalar, Expr):
-            return NonZero(scalar)
-        elif scalar >= 1e-12:
-            return 0
-        else:
-            raise Unsatisfiable
+        return NonZero(context.compute(self.scalar))
 
-@dataclass(eq=False)
+    def __hash__(self):
+        return hash(self.scalar)
+
+@dataclass(eq=True)
 class Relation(Expr):
-    lhs : Scalar
-    rhs : Scalar
+    objective : Scalar
 
-@dataclass(eq=False)
+@dataclass(eq=True)
 class Eq(Relation):
     def soft(self, weight):
-        return SoftEq(self.lhs, self.rhs, weight)
+        return SoftEq(self.objective, weight)
 
     def stringify(self, s):
-        return f"Eq({s(self.lhs)}, {s(self.rhs)})"
+        return f"Eq({s(self.objective)})"
 
     def evaluate(self, context):
-        lhs = context.compute(self.lhs)
-        rhs = context.compute(self.rhs)
-        if isinstance(lhs, Expr) or isinstance(rhs, Expr):
-            return Eq(lhs, rhs)
-        return lhs - rhs
+        return Eq(context.compute(self.objective))
 
-@dataclass(eq=False)
+    def __hash__(self):
+        return hash(self.objective)
+
+def eq(lhs, rhs):
+    return Eq(convert(lhs - rhs))
+
+@dataclass(eq=True)
 class SoftEq(Relation):
     weight : float
 
     def stringify(self, s):
-        return f"Eq({s(self.lhs)}, {s(self.rhs)}).soft({self.weight})"
+        return f"Eq({s(self.objective)}).soft({self.weight})"
 
     def evaluate(self, context):
-        lhs = context.compute(self.lhs)
-        rhs = context.compute(self.rhs)
-        if isinstance(lhs, Expr) or isinstance(rhs, Expr):
-            return SoftEq(lhs, rhs, self.weight)
-        return lhs - rhs
+        return SoftEq(context.compute(self.objective), self.weight)
+
+    def __hash__(self):
+        return hash((self.objective, self.weight))
 
 @dataclass(eq=False)
 class Entity(Expr):
@@ -525,6 +863,22 @@ class VectoredContext(EvaluationContext):
     def __getitem__(self, variable):
         return self.x[self.variables[variable]]
 
+@dataclass(eq=False)
+class EmptyContext(EvaluationContext):
+    memo : Dict[Scalar, Scalar]
+
+    def compute(self, scalar):
+        if isinstance(scalar, Symbol):
+            return scalar
+        try:
+            return self.memo[scalar]
+        except KeyError:
+            self.memo[scalar] = value = scalar.evaluate(self)
+            return value
+
+    def __getitem__(self, variable):
+        return variable
+
 def all_exprs(system):
     visited = set()
     def visit(expr):
@@ -556,18 +910,91 @@ def all_variables(system):
         total.update(get_variables(expr))
     return out, total
 
-def print_system(system):
+@dataclass(eq=False)
+class CellGet:
+    k : int
+    i : int
+    def __call__(self, xs):
+        return xs[self.k][self.i]
+
+@dataclass(eq=False)
+class CellValue:
+    value : float
+    def __call__(self, xs):
+        return self.value
+
+@dataclass(eq=False)
+class Cell:
+    op : Any
+    args : List[Any]
+    def __call__(self, xs):
+        x = [a(xs) for a in self.args]
+        return self.op(*x)
+
+def cells(system, variables, known):
+    common = {x: i for i, x in enumerate(exprs_postorder(system))}
+    def build(expr, deep=True):
+        if expr in known:
+            return CellGet(3, known[expr])
+        if isinstance(expr, Symbol):
+            return CellGet(0, variables[expr])
+        if deep and expr in common:
+            return CellGet(2, common[expr])
+        if isinstance(expr, NonZero):
+            return Cell(nonzero, [build(expr.scalar)])
+        if isinstance(expr, (Eq, SoftEq)):
+            return build(expr.objective)
+        if isinstance(expr, Abs):
+            return Cell(abs, [build(expr.scalar)])
+        if isinstance(expr, Sqrt):
+            return Cell(math.sqrt, [build(expr.scalar)])
+        if isinstance(expr, Acos):
+            f = lambda x: math.acos(np.clip(x, -1, +1))
+            return Cell(f, [build(expr.scalar)])
+        if isinstance(expr, Sum):
+            return Cell(lambda *xs: sum(xs), list(map(build, expr.terms)))
+        if isinstance(expr, Product):
+            return Cell(prod, list(map(build, expr.factors)))
+        if isinstance(expr, Power):
+            return Cell(pow, [build(expr.lhs), build(expr.rhs)])
+        if isinstance(expr, (Floating, Rational)):
+            return CellValue(float(expr))
+        assert False, expr
+    return [build(x, False) for x in common]
+
+def nonzero(s):
+    if s < 1e-12:
+        return np.inf
+    else:
+        return 0
+
+def prod(*s):
+    total = 1.0
+    for x in s:
+        total *= x
+    return total
+
+def exprs_postorder(system, include_symbols=False):
     counter = Counter()
     postorder = []
     def visit(expr):
         counter[expr] += 1
         if counter[expr] <= 1:
             for a in expr.subexpressions():
-                if not (isinstance(a, Product) and not a.factors):
+                if not isinstance(a, (Floating, Rational)):
                     visit(a)
             postorder.append(expr)
     for expr in system:
         visit(expr)
+    for x in postorder:
+        if include_symbols and isinstance(x, Symbol):
+            yield x
+        elif counter[x] > 1 and not isinstance(x, Symbol):
+            yield x
+    for x in system:
+        yield x
+
+def print_system(system):
     i = 1
     names = {}
     def system_repr(expr, precedence=0):
@@ -580,39 +1007,38 @@ def print_system(system):
         else:
             return "(" + expr.stringify(system_repr) + ")"
     print("SYSTEM:")
-    for expr in postorder:
+    for expr in exprs_postorder(system, include_symbols=True):
         if isinstance(expr, Symbol):
-            names[expr] = f"v{i}"
-            i += 1
-        elif counter[expr] > 1:
-            print(f"  v{i} =", expr.stringify(system_repr))
             names[expr] = f"v{i}"
             i += 1
         elif expr in system:
             print(f" ", expr.stringify(system_repr))
+        else:
+            print(f"  v{i} =", expr.stringify(system_repr))
+            names[expr] = f"v{i}"
+            i += 1
 
-zero = Product(0.0, [])
-one  = Product(1.0, [])
+undef = Symbol()
+zero  = Rational(Fraction(0))
+one   = Rational(Fraction(1))
 
 @dataclass(eq=False)
-class Dual(Scalar):
-    scalar   : float | Scalar
-    partials : Dict[Symbol, float | Scalar]
+class Dual(Expr):
+    scalar   : Scalar
+    partials : Dict[Symbol, Scalar]
 
-    def evaluate(self, context):
-        scalar = context.compute(self.scalar)
+    def apply(self, fn):
+        scalar = fn(self.scalar)
         partials = {}
         for sym, value in self.partials.items():
-            partials[sym] = context.compute(value)
+            partials[sym] = fn(value)
         return Dual(scalar, partials)
 
     def subexpressions(self):
-        if isinstance(self.scalar, Expr):
-            yield self.scalar
+        yield self.scalar
         for sym, value in self.partials.items():
             yield sym
-            if isinstance(value, Expr):
-                yield value
+            yield value
 
     def stringify(self, s):
         components = []
@@ -627,5 +1053,5 @@ class Dual(Scalar):
                 components.append(f"dual({s(sym)})*{s(val)}")
         return " + ".join(components)
 
-def dual(symbol, value=0.0):
-    return Dual(value, {symbol: 1.0})
+def dual(symbol, value=zero):
+    return Dual(value, {symbol: one})

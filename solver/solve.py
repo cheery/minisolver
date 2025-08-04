@@ -156,18 +156,19 @@ class NoConvergence(Exception):
     pass
 
 def solve_soft(f, f_jac, g, g_jac, g_w, x, tol=1e-6, max_iterations=100, nudge=1e-2):
-    lam = 10
+    lam = 0.01
     def H(x):
         fi = f(x)
         gi = g(x) * g_w
         return np.dot(fi, fi) + np.dot(gi, gi)
     def Q(A, B):
         A_T = A.T
-        return (np.linalg.pinv(A_T @ A) @ A_T @ B)
+        h = np.diag(np.random.uniform(0, lam, A.shape[1]))
+        return (np.linalg.pinv(A_T @ A + h) @ A_T @ B)
     def R(A, B, w):
         W = np.diag(w)
         A_T = A.T
-        Aw = A_T @ W @ A + np.eye(A.shape[1]) * lam
+        Aw = A_T @ W @ A + np.eye(A.shape[1]) * (lam * 100)
         Bw = A_T @ W @ B
         return (np.linalg.pinv(Aw) @ Bw)
     fi = f(x)
@@ -229,7 +230,7 @@ def constrain(f, jac, x, tol=1e-6, max_iterations=100, nudge=1e-2):
     n = x.size
     fi = f(x)
     f_norm = np.linalg.norm(fi, ord=np.inf)
-    lam = 10
+    lam = 0.01
     for i in range(max_iterations):
         if f_norm < tol:
             return x, f_norm

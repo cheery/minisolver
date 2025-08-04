@@ -34,6 +34,7 @@ def solve_constraints(dragging=None):
         context.memo.clear()
         return analyze(jac(sol))[0] == 0
     except:
+        print_system([ent.evaluate(context) for ent in sketch])
         import traceback
         traceback.print_exc()
         return False

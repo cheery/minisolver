@@ -5,8 +5,6 @@ from fractions import Fraction
 import numpy as np
 import math
 
-# TODO: make partial differentiator that is invoked from above
-
 @dataclass(eq=False)
 class Expr:
     precedence = 1000
@@ -59,7 +57,8 @@ class Expr:
     def apply(self, fn):
         attrs = {}
         for f in fields(self):
-            attrs[f.name] = fn(getattr(self, f.name))
+            a = getattr(self, f.name)
+            attrs[f.name] = fn(a) if isinstance(a, Expr) else a
         return type(self)(**attrs)
 
     def evaluate(self, context):
@@ -70,6 +69,9 @@ class Expr:
             a = getattr(self, f.name)
             if isinstance(a, Expr):
                 yield a
+
+    def diff(self, memo, derive=None):
+        return self.apply(lambda x: x.diff(memo, derive))
 
 @dataclass(eq=False)
 class Scalar(Expr):
@@ -101,8 +103,8 @@ class Floating(Scalar):
     def stringify(self, s):
         return str(self.value)
 
-    def diff(self, context):
-        return Dual(self.value, {})
+    def diff(self, memo, derive=None):
+        return Dual(self, {})
 
     def evaluate(self, context):
         return self
@@ -126,8 +128,8 @@ class Rational(Scalar):
     def stringify(self, s):
         return str(self.value)
 
-    def diff(self, context):
-        return Dual(self.value, {})
+    def diff(self, memo, derive=None):
+        return Dual(self, {})
 
     def evaluate(self, context):
         return self
@@ -150,34 +152,30 @@ class Product(Scalar):
     kind = 1
     precedence = 20
 
-    def diff(self, context):
-        factors = [context.compute(factor) for factor in self.factors]
-        assert False
+    def diff(self, memo, derive=None):
+        if self in memo:
+            return memo[self]
+        in_factors = [factor.diff(memo, derive) for factor in self.factors]
+        result = one
+        factors = []
+        pfactors = defaultdict(list)
+        for i, factor in enumerate(in_factors):
+            result *= factor.scalar
+            factors.append(factor.scalar)
+            for sym, value in factor.partials.items():
+                pfactors[sym].append((i, value))
+        partials = {}
+        for sym, xs in pfactors.items():
+            partials[sym] = product_derivative(factors, xs)
+        memo[self] = result = Dual(result, partials)
+        return result
 
     def evaluate(self, context):
         factors = [context.compute(factor) for factor in self.factors]
-        if any(isinstance(factor, Dual) for factor in factors):
-            result = one
-            factors = []
-            pfactors = defaultdict(list)
-            for i, factor in enumerate(factors):
-                if isinstance(factor, Dual):
-                    result *= factor.scalar
-                    factors.append(factor.scalar)
-                    for sym, value in factor.partials.items():
-                        pfactors[sym].append((i, value))
-                else:
-                    result *= factor
-                    factors.append(factor)
-            partials = {}
-            for sym, xs in pfactors.items():
-                partials[sym] = product_derivative(factors, xs)
-            return Dual(result, partials)
-        else:
-            result = one
-            for factor in factors:
-                result *= factor
-            return result
+        result = one
+        for factor in factors:
+            result *= factor
+        return result
 
     def apply(self, fn):
         return Product([fn(x) for x in self.factors])
@@ -227,15 +225,24 @@ class Power(Scalar):
     def stringify(self, s):
         return f"{s(self.lhs, 30)}**{s(self.rhs, 30)}"
 
-    def diff(self, context):
-        lhs = context.compute(self.lhs)
-        rhs = context.compute(self.rhs)
-        assert False
+    def diff(self, memo, derive=None):
+        if self in memo:
+            return memo[self]
+        lhs = self.lhs.diff(memo, derive)
+        rhs = self.rhs.diff(memo, derive)
+        scalar = lhs.scalar ** rhs.scalar
+        ln_lhs = ln(lhs.scalar)
+        partials = {}
+        for sym in set(lhs.partials) | set(rhs.partials):
+            x = lhs.partials.get(sym, zero)
+            y = rhs.partials.get(sym, zero)
+            partials[sym] = scalar * (y * ln_lhs + rhs.scalar * x / lhs.scalar)
+        memo[self] = result = Dual(scalar, partials)
+        return result
 
     def evaluate(self, context):
         lhs = context.compute(self.lhs)
         rhs = context.compute(self.rhs)
-        assert not isinstance(lhs, Dual) or isinstance(rhs, Dual), "TODO"
         return lhs ** rhs
 
     def _eq(self, other):
@@ -255,25 +262,21 @@ class Sum(Scalar):
     kind = 3
     precedence = 10
 
-    def diff(self, context):
-        terms = [context.compute(term) for term in self.terms]
-        assert False
+    def diff(self, memo, derive=None):
+        if self in memo:
+            return memo[self]
+        terms = [term.diff(memo, derive) for term in self.terms]
+        result = []
+        partials = defaultdict(float)
+        for term in terms:
+            result.append(term.scalar)
+            for sym, value in term.partials.items():
+                partials[sym] += value
+        memo[self] = result = Dual(sum(result), dict(partials.items()))
+        return result
 
     def evaluate(self, context):
-        terms = [context.compute(term) for term in self.terms]
-        if any(isinstance(term, Dual) for term in terms):
-            result = []
-            partials = defaultdict(float)
-            for term in terms:
-                if isinstance(term, Dual):
-                    result.append(term.scalar)
-                    for sym, value in term.partials.items():
-                        partials[sym] += value
-                else:
-                    result.append(term)
-            return Dual(sum(result), partials)
-        else:
-            return sum(terms)
+        return sum(context.compute(term) for term in self.terms)
 
     def apply(self, fn):
         return Sum([fn(x) for x in self.terms])
@@ -321,13 +324,34 @@ class Function(Scalar):
         return type(self) == type(other) and tuple(self.subexpressions()) < tuple(other.subexpressions())
 
 @dataclass(eq=False)
+class UnaryFunction(Function):
+    scalar : Scalar
+
+    def diff(self, memo, derive=None):
+        if self in memo:
+            return memo[self]
+        x = self.scalar.diff(memo, derive)
+        result = self.op(x.scalar)
+        partials = {}
+        for sym, dx in x.partials.items():
+            partials[sym] = self.dop(x.scalar, dx, result)
+        memo[self] = result = Dual(result, partials)
+        return result
+
+@dataclass(eq=False)
 class Symbol(Scalar):
     kind = 5
     def stringify(self, s):
         return f"Symbol()"
 
-    def diff(self, context):
-        return dual(self, self)
+    def diff(self, memo, derive=None):
+        if self in memo:
+            return memo[self]
+        if derive is None or self in derive:
+            memo[self] = result = dual(self, self)
+        else:
+            memo[self] = result = self
+        return result
 
     def evaluate(self, context):
         try:
@@ -418,10 +442,10 @@ def power_integer(v, n):
 
 def product(factors):
     factors.sort()
-    if undef in factors:
-        return undef
     if zero in factors:
         return zero
+    if undef in factors:
+        return undef
     if len(factors) == 1:
         return factors[0]
     v = product_fold(factors)
@@ -547,7 +571,7 @@ class Previous(Function):
     name = "Previous"
     scalar : Scalar
 
-    def diff(self, context):
+    def diff(self, memo, derive=None):
         raise RuntimeError
 
     def evaluate(self, context):
@@ -560,69 +584,6 @@ class Previous(Function):
         else:
             return self
 
-#    def evaluate(self, context):
-#        scalar = context.compute(self.scalar)
-#        if isinstance(scalar, Dual):
-#            result = self.op(scalar.scalar)
-#            partials = {}
-#            for sym, d in scalar.partials.items():
-#                partials[sym] = self.dop(scalar.scalar, d, result)
-#            return Dual(result, partials)
-#        elif isinstance(scalar, Expr):
-#            return type(self)(scalar)
-#        else:
-#            return self.op(scalar)
-#@dataclass(eq=False)
-#class Previous(Unary):
-#    def stringify(self, s):
-#        return f"Previous({s(self.scalar)})"
-#
-#    def evaluate(self, context):
-#        if context.previous is not None:
-#            scalar = context.previous.compute(self.scalar)
-#            if isinstance(scalar, Expr):
-#                return type(self)(scalar)
-#            else:
-#                return scalar
-#        else:
-#            return self
-#
-#@dataclass(eq=False)
-#class PowN(Unary):
-#    power : float
-#    precedence = 20
-#    def stringify(self, s):
-#        if self.power < 0:
-#            return f"1 / {s(PowN(self.scalar, -self.power), 19)}"
-#        elif self.power == 1:
-#            return f"{s(self.scalar, 20)}"
-#        else:
-#            return f"{s(self.scalar, 20)}**{self.power}"
-#
-#    def op(self, scalar):
-#        if self.power < 0 and scalar < 1e-12:
-#            raise Unsatisfiable
-#        return scalar ** self.power
-#
-#    def dop(self, scalar, dscalar, result):
-#        if self.power <= 0 and scalar < 1e-12:
-#            raise Nondifferentiable
-#        return dscalar * self.power * (scalar ** (self.power-1))
-#
-#def inv(obj):
-#    if isinstance(obj, Expr):
-#        return PowN(obj, -1)
-#    elif float(obj) < 1e-12:
-#        return PowN(Product(0, []), -1)
-#    else:
-#        return 1.0 / float(obj)
-#
-#def sqr(obj):
-#    if isinstance(obj, Expr):
-#        return PowN(obj, 2)
-#    else:
-#        return float(obj)**2
-
 def sqrt(obj):
     if isinstance(obj, Compound):
         return obj.distribute(sqrt)
@@ -630,23 +591,19 @@ def sqrt(obj):
         return Sqrt.op(convert(obj))
 
 @dataclass(eq=False)
-class Sqrt(Function):
+class Sqrt(UnaryFunction):
     name = "sqrt"
-    scalar : Scalar
 
-    def diff(self, context):
-        assert False
+    @classmethod
+    def dop(cls, x, dx, y):
+        return (y * dx) / (2 * x)
 
     @classmethod
     def op(cls, scalar):
-        assert not isinstance(scalar, Dual)
         if isinstance(scalar, (Floating, Rational)):
             return Floating(math.sqrt(scalar.value))
         else:
             return cls(scalar)
-
-#    def dop(self, scalar, dscalar, result):
-#        return (result * dscalar) / (2 * scalar)
 
 def xabs(obj):
     if isinstance(obj, Compound):
@@ -655,54 +612,82 @@ def xabs(obj):
         return Abs.op(convert(obj))
 
 @dataclass(eq=False)
-class Abs(Function):
-    name = "abs"
-    scalar : Scalar
+class Abs(UnaryFunction):
+    name = "xabs"
 
-    def diff(self, context):
-        assert False
+    @classmethod
+    def dop(cls, x, dx, y):
+        return sign(x) * dx
 
     @classmethod
     def op(cls, scalar):
-        assert not isinstance(scalar, Dual)
         if isinstance(scalar, (Floating, Rational)):
             return Floating(abs(scalar.value))
         else:
             return cls(scalar)
 
-#    def dop(self, scalar, dscalar, result):
-#        if isinstance(scalar, Expr):
-#            raise NotImplemented
-#        if scalar < 0.0:
-#            return -dscalar
-#        else:
-#            return dscalar
-
 def acos(obj):
     if isinstance(obj, Compound):
-        return obj.distribute(abs)
+        return obj.distribute(xabs)
     else:
         return Acos.op(convert(obj))
 
 @dataclass(eq=False)
-class Acos(Function):
+class Acos(UnaryFunction):
     name = "acos"
-    scalar : Scalar
 
-    def diff(self, context):
-        assert False
+    def dop(self, x, dx, y):
+        return -dx / sqrt(1 - x**2)
 
     @classmethod
     def op(cls, scalar):
-        assert not isinstance(scalar, Dual)
         if isinstance(scalar, (Floating, Rational)):
             return Floating(math.acos(scalar.value))
         else:
             return cls(scalar)
 
-#    def dop(self, scalar, dscalar, result):
-#        return -dscalar / sqrt(1 - sqr(scalar))
-#
+def ln(obj):
+    if isinstance(obj, Compound):
+        return obj.distribute(ln)
+    else:
+        return Ln.op(convert(obj))
+
+@dataclass(eq=False)
+class Ln(UnaryFunction):
+    name = "ln"
+
+    def dop(self, x, dx, y):
+        return dx / x
+
+    @classmethod
+    def op(cls, scalar):
+        if isinstance(scalar, (Floating, Rational)):
+            return Floating(math.ln(scalar.value))
+        else:
+            return cls(scalar)
+
+def sign(obj):
+    if isinstance(obj, Compound):
+        return obj.distribute(sign)
+    else:
+        return Sign.op(convert(obj))
+
+@dataclass(eq=False)
+class Sign(UnaryFunction):
+    name = "sign"
+
+    @classmethod
+    def dop(cls, x, dx, y):
+        if x == zero:
+            return 2*x
+        return zero
+
+    @classmethod
+    def op(cls, scalar):
+        if isinstance(scalar, (Floating, Rational)):
+            return one if float(scalar) >= 0 else -one
+        else:
+            return cls(scalar)
 
 def add(lhs, rhs):
     return summation([lhs, rhs])
@@ -735,7 +720,7 @@ def distribute(lhs, rhs, operand):
     elif isinstance(lhs, Scalar) and isinstance(rhs, Compound):
         return rhs.distribute(lambda a: operand(lhs, a))
     else:
-        raise TypeError
+        raise TypeError(f"distribute({lhs} : {type(lhs).__name__}, {rhs} : {type(rhs).__name__}, ...)")
 
 def default_repr(expr, precedence=0):
     if not isinstance(expr, Expr):
@@ -918,6 +903,15 @@ class CellGet:
         return xs[self.k][self.i]
 
 @dataclass(eq=False)
+class CellSet:
+    i : int
+    j : int
+    arg : Any
+    def __call__(self, xs):
+        xs[4][self.i, self.j] = v = self.arg(xs)
+        return v
+
+@dataclass(eq=False)
 class CellValue:
     value : float
     def __call__(self, xs):
@@ -932,7 +926,7 @@ class Cell:
         return self.op(*x)
 
 def cells(system, variables, known):
-    common = {x: i for i, x in enumerate(exprs_postorder(system))}
+    common = {x: i for i, (x, _) in enumerate(exprs_postorder(system))}
     def build(expr, deep=True):
         if expr in known:
             return CellGet(3, known[expr])
@@ -940,16 +934,15 @@ def cells(system, variables, known):
             return CellGet(0, variables[expr])
         if deep and expr in common:
             return CellGet(2, common[expr])
-        if isinstance(expr, NonZero):
-            return Cell(nonzero, [build(expr.scalar)])
-        if isinstance(expr, (Eq, SoftEq)):
-            return build(expr.objective)
         if isinstance(expr, Abs):
             return Cell(abs, [build(expr.scalar)])
         if isinstance(expr, Sqrt):
             return Cell(math.sqrt, [build(expr.scalar)])
         if isinstance(expr, Acos):
             f = lambda x: math.acos(np.clip(x, -1, +1))
+            return Cell(f, [build(expr.scalar)])
+        if isinstance(expr, Sign):
+            f = lambda x: 1 if x >= 0 else -1
             return Cell(f, [build(expr.scalar)])
         if isinstance(expr, Sum):
             return Cell(lambda *xs: sum(xs), list(map(build, expr.terms)))
@@ -960,7 +953,19 @@ def cells(system, variables, known):
         if isinstance(expr, (Floating, Rational)):
             return CellValue(float(expr))
         assert False, expr
-    return [build(x, False) for x in common]
+    out = [build(x, False) for x in common if x not in system]
+    for col, expr in enumerate(system):
+        if isinstance(expr, NonZero):
+            if not isinstance(expr.scalar, Dual):
+                out.append(Cell(nonzero, [build(expr.scalar)]))
+        if isinstance(expr, (Eq, SoftEq)):
+            if isinstance(expr.objective, Dual):
+                for sym, value in expr.objective.partials.items():
+                    if sym in variables:
+                        out.append(CellSet(col, variables[sym], build(value)))
+            else:
+                out.append(build(expr.objective))
+    return out
 
 def nonzero(s):
     if s < 1e-12:
@@ -988,11 +993,11 @@ def exprs_postorder(system, include_symbols=False):
         visit(expr)
     for x in postorder:
         if include_symbols and isinstance(x, Symbol):
-            yield x
+            yield x, True
         elif counter[x] > 1 and not isinstance(x, Symbol):
-            yield x
+            yield x, True
     for x in system:
-        yield x
+        yield x, False
 
 def print_system(system):
     i = 1
@@ -1007,23 +1012,24 @@ def print_system(system):
         else:
             return "(" + expr.stringify(system_repr) + ")"
     print("SYSTEM:")
-    for expr in exprs_postorder(system, include_symbols=True):
+    for expr, vari in exprs_postorder(system, include_symbols=True):
         if isinstance(expr, Symbol):
             names[expr] = f"v{i}"
             i += 1
-        elif expr in system:
-            print(f" ", expr.stringify(system_repr))
-        else:
+        elif vari:
             print(f"  v{i} =", expr.stringify(system_repr))
             names[expr] = f"v{i}"
             i += 1
+        else:
+            print(f" ", expr.stringify(system_repr))
 
 undef = Symbol()
 zero  = Rational(Fraction(0))
 one   = Rational(Fraction(1))
 
 @dataclass(eq=False)
-class Dual(Expr):
+class Dual(Scalar):
+    kind = -1
     scalar   : Scalar
     partials : Dict[Symbol, Scalar]
 
@@ -1052,6 +1058,15 @@ class Dual(Expr):
             else:
                 components.append(f"dual({s(sym)})*{s(val)}")
         return " + ".join(components)
+
+    def __hash__(self):
+        return id(self)
+
+    def _eq(self, other):
+        return self is other
+
+    def _lt(self, other):
+        return id(self) < id(other)
 
 def dual(symbol, value=zero):
     return Dual(value, {symbol: one})

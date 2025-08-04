@@ -56,7 +56,7 @@ class Line(Entity):
     scalar : Scalar
 
     def stringify(self, s):
-        return f"two.Line({s(self.normal)}, {s(self.distance)})"
+        return f"two.Line({s(self.vector)}, {s(self.scalar)})"
 
 def point_line_distance(point, vector, scalar):
     mag = np.linalg.norm(vector)
@@ -72,6 +72,9 @@ class Drag(Entity):
     def constraints(self):
         yield eq(mag(self.a - self.b), zero).soft(100)
 
+    def stringify(self, s):
+        return f"two.Drag({s(self.a)}, {s(self.b)})"
+
 @dataclass(eq=False)
 class Coincident(Entity):
     a : Point
@@ -80,8 +83,11 @@ class Coincident(Entity):
     def constraints(self):
         vector = self.t.vector
         scalar = self.t.scalar
-        yield NonZero(vector @ vector)
+        #yield NonZero(vector @ vector)
         yield eq(self.a @ vector, -scalar)
+
+    def stringify(self, s):
+        return f"two.Coincident({s(self.a)}, {s(self.t)})"
 
 @dataclass(eq=False)
 class SoftCoincident(Entity):
@@ -91,8 +97,11 @@ class SoftCoincident(Entity):
     def constraints(self):
         vector = self.t.vector
         scalar = self.t.scalar
-        yield NonZero(vector @ vector)
+        #yield NonZero(vector @ vector)
         yield eq(self.a @ vector, -scalar).soft(100.0)
+
+    def stringify(self, s):
+        return f"two.SoftCoincident({s(self.a)}, {s(self.t)})"
 
 @dataclass(eq=False)
 class Distance(Entity):
@@ -104,6 +113,9 @@ class Distance(Entity):
     def constraints(self):
         n = self.along / mag(self.along)
         yield eq(xabs(n @ self.a - n @ self.b), self.d)
+
+    def stringify(self, s):
+        return f"two.Distance({s(self.d)}, {s(self.a)}, {s(self.b)}, {s(self.along)})"
 
 @dataclass(eq=False)
 class Phi(Entity):
@@ -117,6 +129,9 @@ class Phi(Entity):
         yield eq(acos(dot(self.n / mag_n, self.m / mag_m)), self.a)
         yield eq(mag_n, Previous(mag_n)).soft(0.1)
         yield eq(mag_m, Previous(mag_m)).soft(0.1)
+
+    def stringify(self, s):
+        return f"two.Phi({s(self.a)}, {s(self.n)}, {s(self.m)})"
 
 def angle_of(n, m):
     magn = np.linalg.norm(n)

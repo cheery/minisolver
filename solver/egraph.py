@@ -163,15 +163,18 @@ class EGraph:
 
     def repair(self, eclassid):
         eclass = self.eclasses[self.eclasses.find(eclassid)]
-        eclass.nodes = set(self.canonicalize(n) for n in eclass.nodes)
         uses, eclass.uses = eclass.uses, {}
         etuple_sets = []
 
-        for p_node, p_eclassid in eclass.uses.items():
+        for p_node, p_eclassid in uses.items():
+            p_eclassid = self.eclasses.find(p_eclassid)
+            p_eclass = self.eclasses[p_eclassid]
+            p_eclass.nodes.discard(p_node)
             self.hashcons.pop(p_node)
             p_etuple = self.etuples.pop(p_node)
             p_node = self.canonicalize(p_node)
-            self.hashcons[p_node] = self.eclasses.find(p_eclassid)
+            self.hashcons[p_node] = p_eclassid
+            p_eclass.nodes.add(p_node)
             etuple_sets.append((p_node, p_etuple))
 
         merges = []
@@ -243,23 +246,25 @@ class EGraph:
     def query(self, q, argc):
         pend = []
         out = set()
-        def _pending_(q):
+        def _pending_(q, pivot):
             if len(q) != 0:
                 kind, bind = q[0]
                 for m in self.pending_relation(kind, bind, {}):
-                    pend.append({k: m[i] for i, k in bind.items()})
-                return _pending_(q[1:])
-        def _execute_(q, xs):
+                    pend.append((pivot, {k: m[i] for i, k in bind.items()}))
+                return _pending_(q[1:], pivot+1)
+        def _execute_(q, xs, pivot):
             if len(q) == 0:
                 out.add(tuple(xs[i] for i in range(argc)))
+            elif pivot == 0:
+                _execute_(q[1:], xs, pivot-1)
             else:
                 kind, bind = q[0]
                 for m in self.relation(kind, bind, xs):
                     ys = xs | {k: m[i] for i, k in bind.items()}
-                    _execute_(q[1:], ys)
-        _pending_(q)
-        for xs in pend:
-            _execute_(q, xs)
+                    _execute_(q[1:], ys, pivot-1)
+        _pending_(q, 0)
+        for pivot, xs in pend:
+            _execute_(q, xs, pivot)
         return out
 
     def reset(self):
@@ -291,7 +296,7 @@ class expr:
         return out
 
 @dataclass(eq=True, frozen=True)
-class const1(expr):
+class const(expr):
     value : int #= field(metadata={"sub":minima})
 
 @dataclass(eq=True, frozen=True)
@@ -305,25 +310,31 @@ class mul(expr):
     rhs : expr
 
 eg = EGraph()
-i = eg.add(ENode(add, (eg.add(ENode(const1, (100,))), eg.add(ENode(const1, (100,))))))
+i0 = eg.add(ENode(add, (eg.add(ENode(const, (100,))), eg.add(ENode(const, (100,))))))
+i1 = eg.add(ENode(mul, (i0, i0)))
 
 while not eg.is_saturated:
     eg.rebuild()
     
     Q = [ (add,    {-1: 0, 0: -2, 1: -1}),
-          (const1, {-1: -2, 0: 1}),
-          (const1, {-1: -1, 0: 2}) ]
+          (const, {-1: -2, 0: 1}),
+          (const, {-1: -1, 0: 2}) ]
+
+    R = [ (mul,    {-1: 0, 0: -2, 1: -1}),
+          (const, {-1: -2, 0: 1}),
+          (const, {-1: -1, 0: 2}) ]
     
     matches = []
-    print("REL")
-    for xs in eg.query(Q, 3):
-        matches.append((0, xs))
+    matches.extend((0, xs) for xs in eg.query(Q, 3))
+    matches.extend((1, xs) for xs in eg.query(R, 3))
     eg.reset()
         
     for rule, xs in matches:
-        print("found", rule, xs)
         if rule == 0:
-            t = eg.add(ENode(const1, (xs[1] + xs[2],)))
+            t = eg.add(ENode(const, (xs[1] + xs[2],)))
+            eg.merge(xs[0], t)
+        if rule == 1:
+            t = eg.add(ENode(const, (xs[1] * xs[2],)))
             eg.merge(xs[0], t)
 
 print("EC")

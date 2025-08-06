@@ -20,7 +20,7 @@ def setup(entities, context, known, knownvec):
     hard = set(obj.evaluate(cx) for obj in hard)
     soft = set(obj.evaluate(cx) for obj in soft)
 
-    each, x0 = make_vectored_context(hard | soft, context)
+    each, x0 = make_vectored_context(hard | soft, context, known)
     wrap = lambda x: VectoredContext(x0, x0.variables, {}, x)
 
     memo = {}
@@ -72,11 +72,13 @@ def setup(entities, context, known, knownvec):
     #g_jac = approximate_jacobian(g)
     return f, f_jac, g, g_jac, g_w, x0.x.copy(), wrap
 
-def make_vectored_context(system, context):
+def make_vectored_context(system, context, known):
     each, symbols = all_variables(system)
     variables = {}
     vector  = []
     for sym in symbols:
+        if sym in known:
+            continue
         variables[sym] = len(vector)
         try:
             vector.append(context[sym])

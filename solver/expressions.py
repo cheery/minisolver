@@ -350,7 +350,7 @@ class Symbol(Scalar):
         if derive is None or self in derive:
             memo[self] = result = dual(self, self)
         else:
-            memo[self] = result = self
+            memo[self] = result = Dual(self, {})
         return result
 
     def evaluate(self, context):
@@ -643,6 +643,46 @@ class Acos(UnaryFunction):
     def op(cls, scalar):
         if isinstance(scalar, (Floating, Rational)):
             return Floating(math.acos(scalar.value))
+        else:
+            return cls(scalar)
+
+def cos(obj):
+    if isinstance(obj, Compound):
+        return obj.distribute(xabs)
+    else:
+        return Cos.op(convert(obj))
+
+@dataclass(eq=False)
+class Cos(UnaryFunction):
+    name = "cos"
+
+    def dop(self, x, dx, y):
+        return -sin(x) * dx
+
+    @classmethod
+    def op(cls, scalar):
+        if isinstance(scalar, (Floating, Rational)):
+            return Floating(math.cos(scalar.value))
+        else:
+            return cls(scalar)
+
+def sin(obj):
+    if isinstance(obj, Compound):
+        return obj.distribute(xabs)
+    else:
+        return Sin.op(convert(obj))
+
+@dataclass(eq=False)
+class Sin(UnaryFunction):
+    name = "sin"
+
+    def dop(self, x, dx, y):
+        return -cos(x) * dx
+
+    @classmethod
+    def op(cls, scalar):
+        if isinstance(scalar, (Floating, Rational)):
+            return Floating(math.sin(scalar.value))
         else:
             return cls(scalar)
 
@@ -1014,7 +1054,7 @@ def print_system(system):
     print("SYSTEM:")
     for expr, vari in exprs_postorder(system, include_symbols=True):
         if isinstance(expr, Symbol):
-            names[expr] = f"v{i}"
+            names[expr] = f"s{i}"
             i += 1
         elif vari:
             print(f"  v{i} =", expr.stringify(system_repr))

@@ -111,8 +111,7 @@ class Distance(Entity):
     along : Vector
 
     def constraints(self):
-        n = self.along / mag(self.along)
-        yield eq(xabs(n @ self.a - n @ self.b), self.d)
+        yield eq((self.along @ (self.a - self.b))**2 / (self.along @ self.along), self.d**2)
 
     def stringify(self, s):
         return f"two.Distance({s(self.d)}, {s(self.a)}, {s(self.b)}, {s(self.along)})"
@@ -124,11 +123,11 @@ class Phi(Entity):
     m : Vector
 
     def constraints(self):
-        mag_n = mag(self.n)
-        mag_m = mag(self.m)
-        yield eq(acos(dot(self.n / mag_n, self.m / mag_m)), self.a)
-        yield eq(mag_n, Previous(mag_n)).soft(0.1)
-        yield eq(mag_m, Previous(mag_m)).soft(0.1)
+        n2 = self.n@self.n
+        m2 = self.m@self.m
+        yield eq(acos(dot(self.n, self.m) / (sqrt(n2) * sqrt(m2))), self.a)
+        yield eq(sqrt(n2), Previous(sqrt(n2))).soft(0.01)
+        yield eq(sqrt(m2), Previous(sqrt(m2))).soft(0.01)
 
     def stringify(self, s):
         return f"two.Phi({s(self.a)}, {s(self.n)}, {s(self.m)})"

@@ -5,61 +5,20 @@ from typing import List, Dict, Optional, Callable, Tuple, Any, Set, Union
 # "Relational E-Matching"
 # "Better Together: Unifying Datalog and Equality Saturation"
 
-class DisjointSet:
-    def __init__(self):
-        self.parent = []
-        self.bunches = {}
-
-    def __getitem__(self, index):
-        return self.bunches[self.find(index)]
-
-    def __len__(self):
-        return len(self.bunches)
-
-    def __iter__(self):
-        return iter(self.bunches)
-
-    def items(self):
-        return self.bunches.items()
-
-    def new(self, bunch):
-        self.parent.append(i := len(self.parent))
-        self.bunches[i] = bunch
-        return i
-
-    def find(self, index):
-        while index != self.parent[index]:
-            self.parent[index] = index = self.parent[self.parent[index]]
-        return index
-
-    def union(self, i, j):
-        i = self.find(i)
-        j = self.find(j)
-        if i != j:
-            self.parent[i] = j
-            self.bunches[j] |= self.bunches.pop(i)
-            return True, j
-        else:
-            return False, j
+class Contradiction(Exception):
+    pass
 
 constant = object()
 term     = object()
 minima   = object()
 maxima   = object()
 unify    = object()
+check    = object()
 
 @dataclass(eq=True, frozen=True)
 class ENode:
     kind     : type
     children : Tuple[Any]
-
-    def masked(self):
-        out = []
-        a = iter(self.children)
-        for sub in self.kind.sub():
-            if sub == term or sub == constant:
-                out.append((sub == term, next(a)))
-        return out
 
     def split(self):
         children = []
@@ -69,177 +28,177 @@ class ENode:
                 children.append(child)
             else:
                 etuple.append(child)
-        return ENode(self.kind, tuple(children)), tuple(etuple)
+        return self.kind, tuple(children), tuple(etuple)
 
-    def join(self, etuple):
-        children = []
-        a = iter(self.children)
-        b = iter(etuple)
-        for sub in self.kind.sub():
-            children.append(next(a if sub == term or sub == constant else b))
-        return ENode(self.kind, tuple(children))
+ETuple = Tuple[Any]
 
-    def merge(self, egraph, left, right):
-        a = iter(left)
-        b = iter(right)
+@dataclass(eq=False)
+class EClass:
+    parent : Optional['EClass']
+    terms  : Dict[type, Dict[ETuple, ETuple]]
+    uses   : List[ENode]
+    forbid : Set['EClass']
+
+    @classmethod
+    def new(cls, enode):
+        kind, ekey, etuple = enode.split()
+        return cls(None, {kind: {ekey: etuple}}, [], set())
+
+    def __repr__(self):
+        return str(id(self))
+
+class EGraph:
+    def __init__(self):
+        self.eclasses = set()
+        self.hashcons : Dict[ENode, int] = {}
+        self.worklist : List[int] = []
+        self.new_terms : Dict(type, List[ENode]) = {}
+        self.is_saturated = True
+
+    def find(self, bunch):
+        if not isinstance(bunch, EClass):
+            return bunch
+        if bunch.parent is None:
+            return bunch
+        while bunch.parent.parent is not None:
+            bunch.parent = bunch.parent.parent
+        return bunch.parent
+
+    def canonicalize(self, enode):
+        return ENode(enode.kind, tuple(self.find(obj) for obj in enode.children))
+
+    def add(self, kind, children):
+        node = self.canonicalize(ENode(kind, children))
+        try:
+            return self.find(self.hashcons[node])
+        except KeyError:
+            self.eclasses.add(eclass := EClass.new(node))
+            for child in node.children:
+                if isinstance(child, EClass):
+                    child.uses.append(node)
+            self.hashcons[node] = eclass
+            self.new_terms.setdefault(node.kind, []).append(node)
+            self.is_saturated = False
+            return eclass
+
+    def merge(self, eclass1, eclass2):
+        eclass1 = self.find(eclass1)
+        eclass2 = self.find(eclass2)
+        if eclass1 is eclass2:
+            return eclass1
+        if len(eclass1.uses) >= len(eclass2.uses):
+            eclass2.parent = eclass1
+            self.worklist.append(eclass2)
+            self.is_saturated = False
+            return eclass1
+        else:
+            eclass1.parent = eclass2
+            self.worklist.append(eclass1)
+            self.is_saturated = False
+            return eclass2
+
+    def merge_etuples(self, kind, ekey, etuple1, etuple2):
+        xs = iter(etuple1)
+        ys = iter(etuple2)
         out = []
         changed = False
-        for sub in self.kind.sub():
+        for sub in kind.sub():
             if sub == term or sub == constant:
                 continue
-            x = next(a)
-            y = next(b)
+            x = next(xs)
+            y = next(ys)
             changed |= x != y
             if sub == minima:
                 out.append(min(x, y))
             elif sub == maxima:
                 out.append(max(x, y))
             elif sub == unify:
-                out.append(egraph.merge(x, y))
-        return changed, tuple(out)
+                out.append(self.merge(x, y))
+            elif sub == check:
+                if hasattr(x, "align"):
+                    out.append(x.align(y))
+                else:
+                    if x != y:
+                        raise Contradiction(f"{x} == {y}")
+                    out.append(x)
+        if changed:
+            node = self.rejoin_enode(kind, ekey, out)
+            self.new_terms.setdefault(node.kind, []).append(node)
+        return tuple(out)
 
-ETuple = Tuple[Any]
+    def rejoin_enode(self, kind, ekey, etuple):
+        return ENode(kind, tuple(self._rejoin_enode_children(kind, ekey, etuple)))
 
-@dataclass(eq=False)
-class EClass:
-    nodes : Set[ENode]
-    #data : Any
-    uses : Dict[ENode, 'EClass']
-    def __or__(self, other : 'EClass'):
-        #return EClass(self.nodes | other.nodes, self.data | other.data, self.uses | other.uses)
-        return EClass(self.nodes | other.nodes, self.uses | other.uses)
-
-class EGraph:
-    def __init__(self):
-        #self.analysis = Analysis(self)
-        self.eclasses = DisjointSet()
-        self.hashcons : Dict[ENode, int] = {}
-        self.etuples : Dict[ENode, ETuple] = {}
-        self.worklist : List[int] = []
-        self.pending_nodes    : Set[ENode] = set()
-        #self.pending_eclasses : Set[int] = set()
-        self.is_saturated = True
-
-    def canonicalize(self, node):
-        return ENode(node.kind, tuple(self.eclasses.find(obj) if p else obj for p, obj in node.masked()))
-
-    def add(self, node):
-        node, etuple = node.split()
-        node = self.canonicalize(node)
-        if node in self.hashcons:
-            made, etuple = node.merge(self, etuple, self.etuples[node])
-            if made:
-                self.etuples[node] = etuple
-                self.is_saturated = False
-                self.pending_nodes.add(node)
-            return self.eclasses.find(self.hashcons[node])
-        else:
-            #eclassid = self.eclasses.new(EClass({node}, self.analysis.make(node), {}))
-            eclassid = self.eclasses.new(EClass({node}, {}))
-            for p, child in node.masked():
-                if p:
-                    self.eclasses[child].uses[node] = eclassid
-            self.hashcons[node] = eclassid
-            self.etuples[node] = etuple
-            #eclassid = self.analysis.modify(eclassid)
-            self.is_saturated = False
-            self.pending_nodes.add(node)
-            return eclassid
-
-    def merge(self, i, j):
-        made, k = self.eclasses.union(i, j)
-        if made:
-            self.is_saturated = False
-            #self.pending_eclasses.add(k)
-            self.worklist.append(k)
+    def _rejoin_enode_children(self, kind, ekey, etuple):
+        a = iter(ekey)
+        b = iter(etuple)
+        for sub in kind.sub():
+            yield next(a if sub == term or sub == constant else b)
 
     def rebuild(self):
         while self.worklist:
-            todo = set(self.eclasses.find(i) for i in self.worklist)
-            self.worklist.clear()
-            for eclassid in todo:
-                self.repair(eclassid)
+            todo, self.worklist = self.worklist, []
+            for eclass in todo:
+                self.evict(eclass)
         self.is_saturated = True
 
-    def repair(self, eclassid):
-        eclass = self.eclasses[self.eclasses.find(eclassid)]
-        uses, eclass.uses = eclass.uses, {}
-        etuple_sets = []
+    def evict(self, eclass):
+        self.eclasses.discard(eclass)
 
-        for p_node, p_eclassid in uses.items():
-            p_eclassid = self.eclasses.find(p_eclassid)
-            p_eclass = self.eclasses[p_eclassid]
-            p_eclass.nodes.discard(p_node)
-            self.hashcons.pop(p_node)
-            p_etuple = self.etuples.pop(p_node)
+        for p_node in eclass.uses:
+            p_eclass = self.find(self.hashcons.pop(p_node))
             p_node = self.canonicalize(p_node)
-            self.hashcons[p_node] = p_eclassid
-            p_eclass.nodes.add(p_node)
-            etuple_sets.append((p_node, p_etuple))
+            self.hashcons[p_node] = self.merge(p_eclass, self.hashcons.pop(p_node, p_eclass))
 
-        merges = []
-        for p_node, p_eclassid in uses.items():
-            p_node = self.canonicalize(p_node)
-            if p_node in eclass.uses:
-                merges.append((p_eclassid, uses[p_node]))
-            eclass.uses[p_node] = self.eclasses.find(p_eclassid)
+        n_eclass = self.find(eclass)
+        for kind, table in eclass.terms.items():
+            n_table = n_eclass.terms.setdefault(kind, {})
+            for ekey, etuple in table.items():
+                ekey = tuple(self.find(a) for a in ekey)
+                etuple1 = tuple(self.find(a) for a in etuple)
+                etuple2 = n_table.pop(ekey, None)
+                if etuple2 is None:
+                    n_table[ekey] = etuple1
+                else:
+                    n_table[ekey] = self.merge_etuples(kind, ekey, etuple1, etuple2)
 
-        for p_node, p_etuple in etuple_sets:
-            p_node = self.canonicalize(p_node)
-            if p_node in self.etuples:
-                _, p_etuple = p_node.merge(self, p_etuple, self.etuples[p_node])
-            self.etuples[p_node] = p_etuple
+        n_eclass = self.find(eclass)
+        for other in eclass.forbid:
+            other = self.find(other)
+            if other is n_eclass:
+                raise Contradiction
+            other.add(n_eclass)
+            n_eclass.add(other)
 
-        for i, j in merges:
-            self.merge(i, j)
-
-        #eclassid = self.analysis.modify(eclassid)
-        #for p_node, p_eclassid in self.eclasses[self.eclasses.find(eclassid)].uses.items():
-        #    p_eclass = self.eclasses[self.eclasses.find(p_eclassid)]
-        #    new_data = p_eclass.data | self.analysis.make(p_node)
-        #    if new_data != p_eclass.data:
-        #        p_eclass.data = new_data
-        #        self.worklist.append(p_eclassid)
-
-    def examine(self, kind, bind, xs, eclassid, node):
-        if node.kind != kind:
+    def match(self, bind, xs, eclass, node):
+        if -1 in bind and bind[-1] in xs and eclass != xs[bind[-1]]:
             return
-        if -1 in bind and bind[-1] in xs and eclassid != xs[bind[-1]]:
-            return
-        node = node.join(self.etuples[node])
         for i, j in bind.items():
             if i >= 0 and j in xs and node.children[i] != xs[j]:
                 break
         else:
-            return {-1: eclassid} | {i: child for i, child in enumerate(node.children)}
+            return {-1: eclass} | {i: child for i, child in enumerate(node.children)}
 
-    def pending_relation(self, kind, bind, xs):
-        #if -1 in bound:
-        #    if bound[-1] not in self.pending_eclasses:
-        #        eclasses = iter(())
-        #    eclasses = iter([bound[-1]])
-        #else:
-        #    eclasses = iter(self.pending_eclasses)
-        for node in self.pending_nodes:
+    def new_relation(self, kind, bind, xs):
+        for node in self.new_terms.get(kind, ()):
             node = self.canonicalize(node)
-            eclassid = self.hashcons[node]
-            m = self.examine(kind, bind, xs, eclassid, node)
+            eclassid = self.find(self.hashcons[node])
+            m = self.match(bind, xs, eclassid, node)
             if m is not None:
                 yield m
-        #for eclassid in eclasses:
-        #    for node in self.eclasses[eclassid].nodes:
-        #        m = self.examine(kind, bound, bind, eclassid, node)
-        #        if m is not None:
-        #            yield m
 
     def relation(self, kind, bind, xs):
         if -1 in bind and bind[-1] in xs:
             eclasses = iter([xs[bind[-1]]])
         else:
             eclasses = iter(self.eclasses)
-        for eclassid in eclasses:
-            for node in self.eclasses[eclassid].nodes:
-                m = self.examine(kind, bind, xs, eclassid, node)
+        for eclass in eclasses:
+            table = eclass.terms.get(kind, None)
+            if table is None:
+                continue
+            for ekey, etuple in table.items():
+                node = self.rejoin_enode(kind, ekey, etuple)
+                m = self.match(bind, xs, eclass, node)
                 if m is not None:
                     yield m
 
@@ -249,7 +208,7 @@ class EGraph:
         def _pending_(q, pivot):
             if len(q) != 0:
                 kind, bind = q[0]
-                for m in self.pending_relation(kind, bind, {}):
+                for m in self.new_relation(kind, bind, {}):
                     pend.append((pivot, {k: m[i] for i, k in bind.items()}))
                 return _pending_(q[1:], pivot+1)
         def _execute_(q, xs, pivot):
@@ -267,19 +226,15 @@ class EGraph:
             _execute_(q, xs, pivot)
         return out
 
-    def reset(self):
-        self.pending_nodes.clear()
-        #self.pending_eclasses.clear()
-
-# class DummyAnalysis:
-#     def __init__(self, egraph):
-#         self.egraph = egraph
-# 
-#     def make(self, node):
-#         return set()
-# 
-#     def modify(self, eclassid):
-#         return eclassid
+    def run(self, rules):
+        while not self.is_saturated:
+            self.rebuild()
+            matches = []
+            for pattern, arity, process in rules:
+                matches.extend((process, xs) for xs in self.query(pattern, arity))
+            self.new_terms.clear()
+            for process, args in matches:
+                process(self, *args)
 
 @dataclass(eq=True, frozen=True)
 class expr:
@@ -297,7 +252,7 @@ class expr:
 
 @dataclass(eq=True, frozen=True)
 class const(expr):
-    value : int #= field(metadata={"sub":minima})
+    value : int = field(metadata={"sub":check})
 
 @dataclass(eq=True, frozen=True)
 class add(expr):
@@ -310,33 +265,33 @@ class mul(expr):
     rhs : expr
 
 eg = EGraph()
-i0 = eg.add(ENode(add, (eg.add(ENode(const, (100,))), eg.add(ENode(const, (100,))))))
-i1 = eg.add(ENode(mul, (i0, i0)))
+i0 = eg.add(add, (eg.add(const, (100,)), eg.add(const, (40,))))
+i1 = eg.add(add, (eg.add(const, (20,)), eg.add(const, (60,))))
+i2 = eg.add(mul, (i0, i1))
 
-while not eg.is_saturated:
-    eg.rebuild()
-    
-    Q = [ (add,    {-1: 0, 0: -2, 1: -1}),
-          (const, {-1: -2, 0: 1}),
-          (const, {-1: -1, 0: 2}) ]
+Q = [ (add,    {-1: 0, 0: -2, 1: -1}),
+      (const, {-1: -2, 0: 1}),
+      (const, {-1: -1, 0: 2}) ]
+def process_Q(eg, eclassid, a, b):
+    print(f"{a}+{b}={a+b}")
+    t = eg.add(const, (a+b,))
+    eg.merge(eclassid, t)
 
-    R = [ (mul,    {-1: 0, 0: -2, 1: -1}),
-          (const, {-1: -2, 0: 1}),
-          (const, {-1: -1, 0: 2}) ]
-    
-    matches = []
-    matches.extend((0, xs) for xs in eg.query(Q, 3))
-    matches.extend((1, xs) for xs in eg.query(R, 3))
-    eg.reset()
-        
-    for rule, xs in matches:
-        if rule == 0:
-            t = eg.add(ENode(const, (xs[1] + xs[2],)))
-            eg.merge(xs[0], t)
-        if rule == 1:
-            t = eg.add(ENode(const, (xs[1] * xs[2],)))
-            eg.merge(xs[0], t)
+R = [ (mul,    {-1: 0, 0: -2, 1: -1}),
+      (const, {-1: -2, 0: 1}),
+      (const, {-1: -1, 0: 2}) ]
+def process_R(eg, eclassid, a, b):
+    print(f"{a}*{b}={a*b}")
+    t = eg.add(const, (a*b,))
+    eg.merge(eclassid, t)
 
-print("EC")
-for i, ec in eg.eclasses.items():
-    print(i, ec)
+rules = [(Q, 3, process_Q),
+         (R, 3, process_R)]
+
+eg.run(rules)
+
+for eclass in eg.eclasses:
+    print("EC", eclass)
+    for kind, table in eclass.terms.items():
+        for ekey, etuple in table.items():
+            print(" ", eg.rejoin_enode(kind, ekey, etuple))

@@ -24,6 +24,12 @@ class ENode:
     kind     : type
     children : Tuple[Any]
 
+    @property
+    def eclasses(self):
+        for child in self.children:
+            if isinstance(child, EClass):
+                yield child
+
     def split(self):
         children = []
         etuple = []
@@ -258,44 +264,50 @@ class EGraph:
                 yield self.rejoin_enode(kind, ekey, etuple)
 
     def extract(self, *eclasses):
-        xtr = self.extract_eclasses(eclasses)
+        xtr = self.extract_eclasses_tree(eclasses)
         res = tuple(xtr[eclass] for eclass in eclasses)
         if len(res) == 1:
             return res[0]
         else:
             return res
 
-    def extract_eclasses(self, eclasses):
-        ec_costs = {}
-        def best(eclass):
-            if eclass in ec_costs:
-                return ec_costs[eclass]
-            min_cost = float('inf')
-            best_enode = None
-            ec_costs[eclass] = min_cost, best_enode
-            for enode in self.enodes(eclass):
-                costs = [best(child)[0] for child in enode.children if isinstance(child, EClass)]
-                ecs   = [best(child)[1] for child in enode.children if isinstance(child, EClass)]
-                cost = sum(costs) + enode.kind.cost(*(e.kind for e in ecs))
-                if cost < min_cost:
-                    min_cost = cost
-                    best_enode = enode
-            ec_costs[eclass] = min_cost, best_enode
-            return min_cost, best_enode
-        @cache
-        def construct(eclass):
-            enode = best(eclass)[1]
-            args = []
-            for child in enode.children:
-                if isinstance(child, EClass):
-                    args.append(construct(child))
-                else:
-                    args.append(child)
-            return enode.kind(*args)
-        out = {}
-        for eclass in eclasses:
-            out[eclass] = construct(eclass)
-        return out
+    def extract_dag(self, temp, *eclasses):
+        assert temp is not None
+        temps, xtr = self.extract_eclasses_dag(eclasses, temp)
+        res = list(xtr[eclass] for eclass in eclasses)
+        return temps, res
+
+    #def extract_eclasses(self, eclasses):
+    #    ec_costs = {}
+    #    def best(eclass):
+    #        if eclass in ec_costs:
+    #            return ec_costs[eclass]
+    #        min_cost = float('inf')
+    #        best_enode = None
+    #        ec_costs[eclass] = min_cost, best_enode
+    #        for enode in self.enodes(eclass):
+    #            costs = [best(child)[0] for child in enode.children if isinstance(child, EClass)]
+    #            ecs   = [best(child)[1] for child in enode.children if isinstance(child, EClass)]
+    #            cost = sum(costs) + enode.kind.cost(*(e.kind for e in ecs))
+    #            if cost < min_cost:
+    #                min_cost = cost
+    #                best_enode = enode
+    #        ec_costs[eclass] = min_cost, best_enode
+    #        return min_cost, best_enode
+    #    @cache
+    #    def construct(eclass):
+    #        enode = best(eclass)[1]
+    #        args = []
+    #        for child in enode.children:
+    #            if isinstance(child, EClass):
+    #                args.append(construct(child))
+    #            else:
+    #                args.append(child)
+    #        return enode.kind(*args)
+    #    out = {}
+    #    for eclass in eclasses:
+    #        out[eclass] = construct(eclass)
+    #    return out
 
     def topological_order(self, eclasses):
         visited = set()
@@ -313,49 +325,97 @@ class EGraph:
             visit(eclass)
         return output
 
-    def extract_eclasses_dag(self, eclasses, temp):
-        tail  = {}
+    def extract_eclasses_tree(self, eclasses, temp=None):
         costs = {}
         for eclass in self.topological_order(eclasses):
             best_cost = float('inf')
             best_enode = None
-            best_tail = None
             for enode in self.enodes(eclass):
                 child_costs = 0
-                enode_tail = set([])
                 for child in enode.children:
                     if isinstance(child, EClass) and child not in costs:
                         break # cycle detected
                     if isinstance(child, EClass):
                         child_costs += costs[child][0]
-                        enode_tail.add(child)
-                        enode_tail.update(tail[child])
                 else:
-                    enode_cost = enode.kind.simple_cost + child_costs + len(enode_tail)
+                    enode_cost = enode.kind.simple_cost + child_costs
                     if enode_cost < best_cost:
                         best_cost = enode_cost
                         best_enode = enode
-                        best_tail = enode_tail
             costs[eclass] = best_cost, best_enode
-            tail[eclass] = best_tail
-        created = {}
-        shared = []
+        return self.extract_from_costs(eclasses, costs, temp)
+
+    # This is a brute-force approach, it works on small examples.
+    def extract_eclasses_dag(self, eclasses, temp=None):
+        trail = {}
+        costs = {}
+        for eclass in self.topological_order(eclasses):
+            best_cost = float('inf')
+            best_enode = None
+            best_trail = None
+            for enode in self.enodes(eclass):
+                child_costs = 0
+                enode_trail = set([])
+                for child in enode.children:
+                    if isinstance(child, EClass) and child not in costs:
+                        break # cycle detected
+                    if isinstance(child, EClass):
+                        child_costs += costs[child][0]
+                        enode_trail.add(child)
+                        enode_trail.update(trail[child])
+                else:
+                    enode_cost = enode.kind.simple_cost + sum(costs[t][0] for t in trail)
+                    if enode_cost < best_cost:
+                        best_cost = enode_cost
+                        best_enode = enode
+                        best_trail = enode_trail
+            costs[eclass] = best_enode.kind.simple_cost, best_enode
+            trail[eclass] = best_trail
+        return self.extract_from_costs(eclasses, costs, temp)
+
+    def extract_from_costs(self, eclasses, costs, temp):
+        def is_simple(eclass):
+            return not any(isinstance(c, EClass) for c in costs[eclass][1].children)
+        refs = {}
+        temps = []
+        visited = set()
+        def analyse(eclass):
+            if eclass in visited:
+                if is_simple(eclass) or temp is None:
+                    refs[eclass] = construct(eclass)
+                else:
+                    refs[eclass] = temp(len(temps))
+                    temps.append(construct(eclass))
+                return
+            visited.add(eclass)
+            enode = costs[eclass][1]
+            for child in enode.children:
+                if isinstance(child, EClass):
+                    analyse(child)
         def construct(eclass):
-            if eclass in created:
-                shared.append(created[eclass])
             enode = costs[eclass][1]
             children = []
             for child in enode.children:
                 if isinstance(child, EClass):
-                    children.append(construct(child))
+                    if child in refs:
+                        children.append(refs[child])
+                    else:
+                        children.append(construct(child))
                 else:
                     children.append(child)
-            created[eclass] = term = enode.kind(*children)
+            term = enode.kind(*children)
             return term
+        for eclass in eclasses:
+            analyse(eclass)
         terms = {}
         for eclass in eclasses:
-            terms[eclass] = construct(eclass)
-        return terms
+            if eclass in refs:
+                terms[eclass] = refs[eclass]
+            else:
+                terms[eclass] = construct(eclass)
+        if temp is None:
+            return terms
+        return temps, terms
 
     def __call__(self, u):
         if isinstance(u, EId):
